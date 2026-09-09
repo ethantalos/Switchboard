@@ -1,11 +1,18 @@
 :root {
-  --bg: #16181d;
-  --surface: #1e2127;
-  --border: #2e323b;
-  --text: #e6e8ec;
-  --muted: #9aa1ad;
-  --accent: #6aa9ff;
-  --danger: #ff8080;
+  /* Near-black shell with a faintly warm cast, so red sits on it naturally. */
+  --bg: #0b0a0c;
+  --surface: #0f0e11;
+  --border: #191315;
+  --text: #f2eff0;
+  --muted: #8f878c;
+
+  /* Red at rest is the brand; hot red is reserved for wanting attention. */
+  --brand: #c4534a;
+  --accent: #f96a5e;
+  --warn: #f0a020;
+  --ok: #3fb950;
+  --danger: #ff6b6b;
+
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
 
   color-scheme: dark;
@@ -20,6 +27,6 @@
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
 }

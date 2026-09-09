@@ -1,101 +1,159 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
-type Worktree = {
-  path: string;
-  head: string | null;
-  branch: string | null;
-  detached: boolean;
-  bare: boolean;
-  locked: boolean;
-  prunable: boolean;
+type SessionState = "needs_you" | "working" | "done" | "idle";
+
+type Session = {
+  sessionId: string;
+  cwd: string;
+  state: SessionState;
+  detail: string | null;
+  updatedAt: number;
 };
 
-type Pinned = {
-  name: string;
-  path: string;
-  note?: string;
+const LABEL: Record<SessionState, string> = {
+  needs_you: "needs you",
+  working: "working",
+  done: "done",
+  idle: "idle",
 };
 
-// Hardcoded for now. These become user-managed workspaces once registration
-// and storage exist (TODO sections 2 and 5).
-const PINNED: Pinned[] = [
-  { name: "Themis", path: "C:\Themis" },
-  { name: "Themis B", path: "C:\Themis B" },
-  { name: "Themis C", path: "C:\Themis C" },
-  { name: "Switchboard", path: "C:\Switchboard", note: "this session" },
-];
+const RANK: Record<SessionState, number> = {
+  needs_you: 0,
+  working: 1,
+  done: 2,
+  idle: 3,
+};
 
-const LAST_REPO_KEY = "switchboard.lastRepo";
-const ON_TOP_KEY = "switchboard.alwaysOnTop";
+/// A patch bay: one hub with cords curving out to jacks. Drawn with
+/// currentColor so the mark and the border carry the status colour together.
+function Mark() {
+  return (
+    <svg className="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <g stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" opacity="0.55">
+        <path d="M16 16 C 12.5 14, 11 12.5, 9 10.5" />
+        <path d="M16 16 C 19.5 14, 21 12.5, 23 10.5" />
+        <path d="M16 16 C 16 19.5, 16 21, 16 23" />
+      </g>
+      <g fill="currentColor">
+        <circle cx="9" cy="10.5" r="2.3" opacity="0.8" />
+        <circle cx="23" cy="10.5" r="2.3" opacity="0.8" />
+        <circle cx="16" cy="23" r="2.3" opacity="0.8" />
+        <circle cx="16" cy="16" r="3.5" />
+      </g>
+    </svg>
+  );
+}
 
-function describe(worktree: Worktree): string {
-  if (worktree.branch) return worktree.branch;
-  if (worktree.detached) return "detached HEAD";
-  if (worktree.bare) return "bare";
-  return "unknown";
+/// A real cog: eight teeth around a hub, with the centre punched out.
+function Cog() {
+  const teeth = [0, 45, 90, 135, 180, 225, 270, 315];
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+      <g fill="currentColor">
+        {teeth.map((angle) => (
+          <rect
+            key={angle}
+            x="10.7"
+            y="1.5"
+            width="2.6"
+            height="4.6"
+            rx="0.9"
+            transform={`rotate(${angle} 12 12)`}
+          />
+        ))}
+        <circle cx="12" cy="12" r="6.6" />
+      </g>
+      {/* Sits on the widget surface, so the hub hole matches that colour. */}
+      <circle cx="12" cy="12" r="2.6" fill="var(--surface)" />
+    </svg>
+  );
+}
+
+function basename(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+/// Enough of the session id to tell two sessions in one worktree apart.
+function shortId(sessionId: string): string {
+  return sessionId.replace(/-/g, "").slice(-4);
+}
+
+type Group = {
+  cwd: string;
+  sessions: Session[];
+  state: SessionState;
+  updatedAt: number;
+};
+
+/// One row per worktree, with its sessions underneath. A worktree takes the
+/// state of its most urgent session, so the group header is the thing to scan.
+function groupByWorktree(sessions: Session[]): Group[] {
+  const byCwd = new Map<string, Session[]>();
+  for (const session of sessions) {
+    const list = byCwd.get(session.cwd);
+    if (list) list.push(session);
+    else byCwd.set(session.cwd, [session]);
+  }
+
+  const groups: Group[] = [];
+  for (const [cwd, list] of byCwd) {
+    const ordered = [...list].sort(
+      (a, b) => RANK[a.state] - RANK[b.state] || b.updatedAt - a.updatedAt,
+    );
+    groups.push({
+      cwd,
+      sessions: ordered,
+      state: ordered[0].state,
+      updatedAt: Math.max(...ordered.map((s) => s.updatedAt)),
+    });
+  }
+
+  return groups.sort(
+    (a, b) => RANK[a.state] - RANK[b.state] || b.updatedAt - a.updatedAt,
+  );
+}
+
+function ago(timestamp: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
 }
 
 export default function App() {
-  const [repoPath, setRepoPath] = useState("");
-  const [selected, setSelected] = useState<string | null>(null);
-  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const [onTop, setOnTop] = useState(false);
+  const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
-    const savedRepo = localStorage.getItem(LAST_REPO_KEY);
-    if (savedRepo) {
-      setRepoPath(savedRepo);
-      void load(savedRepo);
-    }
-    if (localStorage.getItem(ON_TOP_KEY) === "true") void toggleOnTop(true);
+    void invoke<Session[]>("list_sessions").then(setSessions).catch(() => {});
+
+    // Rust owns hover: the window never resizes, so it watches the pointer and
+    // tells us when to grow. Nothing here changes window geometry.
+    const offHover = listen<boolean>("hover-changed", (event) => {
+      setExpanded(event.payload);
+    });
+    const offSessions = listen<Session[]>("sessions-changed", (event) =>
+      setSessions(event.payload),
+    );
+
+    const ticker = setInterval(() => setNow(Date.now()), 10_000);
+
+    return () => {
+      void offHover.then((off) => off());
+      void offSessions.then((off) => off());
+      clearInterval(ticker);
+    };
   }, []);
 
-  async function toggleOnTop(enabled: boolean) {
-    setOnTop(enabled);
-    localStorage.setItem(ON_TOP_KEY, String(enabled));
-    try {
-      await invoke("set_always_on_top", { enabled });
-    } catch (err) {
-      setError(String(err));
-    }
-  }
-
-  async function load(path: string) {
-    const target = path.trim();
-    if (!target) return;
-
-    setBusy(true);
-    setError(null);
-    setSelected(target);
-    try {
-      const found = await invoke<Worktree[]>("list_worktrees", { repoPath: target });
-      setWorktrees(found);
-      localStorage.setItem(LAST_REPO_KEY, target);
-    } catch (err) {
-      setError(String(err));
-      setWorktrees([]);
-    } finally {
-      setBusy(false);
-      setLoaded(true);
-    }
-  }
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    void load(repoPath);
-  }
-
-  function selectPinned(pinned: Pinned) {
-    setRepoPath(pinned.path);
-    void load(pinned.path);
-  }
-
-  async function openWorktree(path: string) {
+  async function open(path: string) {
     setError(null);
     try {
       await invoke("open_in_vscode", { path });
@@ -104,76 +162,98 @@ export default function App() {
     }
   }
 
+  const groups = groupByWorktree(sessions);
+  const waiting = sessions.filter((s) => s.state === "needs_you").length;
+  const working = sessions.filter((s) => s.state === "working").length;
+
+  const pulse: SessionState =
+    waiting > 0 ? "needs_you" : working > 0 ? "working" : sessions.length ? "done" : "idle";
+  const count = waiting > 0 ? waiting : sessions.length;
+
   return (
-    <div className="layout">
-      <aside className="sidebar">
-        <p className="sidebar-title">Workspaces</p>
-        <nav>
-          {PINNED.map((pinned) => (
+    <div className="stage">
+      <div
+        className={`box ${expanded ? "expanded" : "collapsed"} ${pulse}`}
+        data-tauri-drag-region
+      >
+        {!expanded && (
+          <>
+            <Mark />
+            {count > 0 && <span className="count">{count}</span>}
+          </>
+        )}
+
+        {expanded && (
+          <>
+            <div className="panel" data-tauri-drag-region>
+              {error && (
+                <p className="error" role="alert">
+                  {error}
+                </p>
+              )}
+
+              {groups.length === 0 ? (
+                <p className="empty">
+                  No sessions yet. Start a Claude Code session and it will appear
+                  here.
+                </p>
+              ) : (
+                <ul className="worktrees">
+                  {groups.map((group) => (
+                    <li key={group.cwd} className="worktree">
+                      <button
+                        className={`worktree-head ${group.state}`}
+                        onClick={() => open(group.cwd)}
+                        title={group.cwd}
+                      >
+                        <span className="dot" aria-hidden="true" />
+                        <span className="worktree-name">
+                          {basename(group.cwd) || "unknown"}
+                        </span>
+                        <span className="worktree-count">
+                          {group.sessions.length}
+                        </span>
+                      </button>
+
+                      <ul className="sessions">
+                        {group.sessions.map((session) => (
+                          <li
+                            key={session.sessionId}
+                            className={`session ${session.state}`}
+                          >
+                            <span className="dot" aria-hidden="true" />
+                            <span className="state">{LABEL[session.state]}</span>
+                            <span className="sid">{shortId(session.sessionId)}</span>
+                            <span className="time">
+                              {ago(session.updatedAt, now)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
             <button
-              key={pinned.path}
-              className={`pinned${selected === pinned.path ? " active" : ""}`}
-              onClick={() => selectPinned(pinned)}
+              className="close"
+              title="Close Switchboard"
+              onClick={() => void invoke("close_widget").catch(() => {})}
             >
-              <span className="pinned-name">{pinned.name}</span>
-              {pinned.note && <span className="pinned-note">{pinned.note}</span>}
+              ×
             </button>
-          ))}
-        </nav>
-      </aside>
-
-      <main className="content">
-        <header className="header">
-          <div>
-            <h1>Switchboard</h1>
-            <p className="subtitle">
-              {selected ? selected : "Select a workspace or enter a path"}
-            </p>
-          </div>
-          <label className="on-top" title="Keep this window above others">
-            <input
-              type="checkbox"
-              checked={onTop}
-              onChange={(event) => toggleOnTop(event.target.checked)}
-            />
-            Stay on top
-          </label>
-        </header>
-
-        <form className="repo-form" onSubmit={submit}>
-          <input
-            value={repoPath}
-            onChange={(event) => setRepoPath(event.target.value)}
-            placeholder="C:\Themis"
-            spellCheck={false}
-            aria-label="Repository path"
-          />
-          <button type="submit" disabled={busy || !repoPath.trim()}>
-            {busy ? "Loading" : "Load"}
-          </button>
-        </form>
-
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
+            <button
+              className="gear"
+              title="Settings"
+              onClick={() => void invoke("open_settings").catch(() => {})}
+            >
+              <Cog />
+            </button>
+          </>
         )}
 
-        {loaded && !error && worktrees.length === 0 && (
-          <p className="empty">No worktrees found.</p>
-        )}
-
-        <ul className="worktrees">
-          {worktrees.map((worktree) => (
-            <li key={worktree.path}>
-              <button className="worktree" onClick={() => openWorktree(worktree.path)}>
-                <span className="branch">{describe(worktree)}</span>
-                <span className="path">{worktree.path}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </main>
+      </div>
     </div>
   );
 }
