@@ -1,12 +1,28 @@
 # Architecture
 
-Current state: a Tauri 2 desktop shell that builds and runs the default
-template UI. No Switchboard features are wired up yet: no repository
-registration, no worktree view, no agent sessions, no persistence.
+Current state: lists the worktrees of one Git repository and opens a checkout
+in VS Code. No agent sessions, no browser/chat/music integrations, and no
+storage beyond remembering the last repository path in the webview.
 
 ## Stack
-Tauri 2 desktop shell, React 19 + TypeScript frontend built by Vite,
-Rust backend. Frontend calls Rust through Tauri commands.
+Tauri 2 desktop shell, React 19 + TypeScript frontend built by Vite, Rust
+backend. See docs/STACK.md.
+
+## Data flow
+The frontend has no OS access; it calls Rust through Tauri's `invoke`, and
+Rust returns serde-serialized values.
+
+| Command | Argument | Returns | Does |
+| --- | --- | --- | --- |
+| `list_worktrees` | `repoPath` | `Worktree[]` | Runs `git worktree list --porcelain` in that directory and parses it |
+| `open_in_vscode` | `path` | nothing | Launches VS Code on that checkout |
+
+`Worktree` carries `path`, `head`, `branch`, and the `detached`, `bare`,
+`locked`, and `prunable` flags. Rust field names are serialized as camelCase.
+
+Both commands return an error string the interface displays rather than
+failing silently. Launching VS Code goes through `cmd /C` on Windows because
+`code` is a shim script that cannot be executed directly.
 
 ## Files
 - README.md: project context, scope, and open questions.
@@ -26,10 +42,9 @@ tsconfig*.json        TypeScript config
 public/               Static assets served as-is
 src/                  React frontend
   main.tsx            React entry point
-  App.tsx             Root component (template default)
-  index.css, App.css  Styles
-  assets/             Images imported by components
-  worktrees.mjs       Parses `git worktree list --porcelain`; not yet wired to UI
+  App.tsx             Repository input, worktree list, open action
+  index.css           Design tokens and base styles
+  App.css             Component styles
 src-tauri/            Rust backend
   Cargo.toml          Rust dependencies
   build.rs            Tauri build script
@@ -37,15 +52,13 @@ src-tauri/            Rust backend
   capabilities/       Permissions granted to the frontend
   icons/              Application icons
   src/main.rs         Binary entry point
-  src/lib.rs          Application setup and Tauri commands
+  src/lib.rs          Tauri commands, worktree parsing, and its unit tests
 ```
-`dist/` (frontend build) and `src-tauri/target/` (Rust build) are generated
-and ignored.
+`dist/` and `src-tauri/target/` are generated and ignored.
 
 ## Commands
 - `npm install` once, then `npm run tauri dev` to run the desktop app.
-- `npm run build` builds the frontend only.
-- `npm run tauri build` produces a packaged app.
+- `npm run build` builds the frontend; `cargo test` runs the Rust tests.
 
 Keep this map current in the same change as file, engine, config, or data-flow
 changes. Plans belong in TODO.md; this file describes only what exists.

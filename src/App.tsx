@@ -1,122 +1,179 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { useEffect, useState, type FormEvent } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import "./App.css";
 
-function App() {
-  const [count, setCount] = useState(0)
+type Worktree = {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  locked: boolean;
+  prunable: boolean;
+};
 
-  return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+type Pinned = {
+  name: string;
+  path: string;
+  note?: string;
+};
 
-      <div className="ticks"></div>
+// Hardcoded for now. These become user-managed workspaces once registration
+// and storage exist (TODO sections 2 and 5).
+const PINNED: Pinned[] = [
+  { name: "Themis", path: "C:\Themis" },
+  { name: "Themis B", path: "C:\Themis B" },
+  { name: "Themis C", path: "C:\Themis C" },
+  { name: "Switchboard", path: "C:\Switchboard", note: "this session" },
+];
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+const LAST_REPO_KEY = "switchboard.lastRepo";
+const ON_TOP_KEY = "switchboard.alwaysOnTop";
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+function describe(worktree: Worktree): string {
+  if (worktree.branch) return worktree.branch;
+  if (worktree.detached) return "detached HEAD";
+  if (worktree.bare) return "bare";
+  return "unknown";
 }
 
-export default App
+export default function App() {
+  const [repoPath, setRepoPath] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [onTop, setOnTop] = useState(false);
+
+  useEffect(() => {
+    const savedRepo = localStorage.getItem(LAST_REPO_KEY);
+    if (savedRepo) {
+      setRepoPath(savedRepo);
+      void load(savedRepo);
+    }
+    if (localStorage.getItem(ON_TOP_KEY) === "true") void toggleOnTop(true);
+  }, []);
+
+  async function toggleOnTop(enabled: boolean) {
+    setOnTop(enabled);
+    localStorage.setItem(ON_TOP_KEY, String(enabled));
+    try {
+      await invoke("set_always_on_top", { enabled });
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function load(path: string) {
+    const target = path.trim();
+    if (!target) return;
+
+    setBusy(true);
+    setError(null);
+    setSelected(target);
+    try {
+      const found = await invoke<Worktree[]>("list_worktrees", { repoPath: target });
+      setWorktrees(found);
+      localStorage.setItem(LAST_REPO_KEY, target);
+    } catch (err) {
+      setError(String(err));
+      setWorktrees([]);
+    } finally {
+      setBusy(false);
+      setLoaded(true);
+    }
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    void load(repoPath);
+  }
+
+  function selectPinned(pinned: Pinned) {
+    setRepoPath(pinned.path);
+    void load(pinned.path);
+  }
+
+  async function openWorktree(path: string) {
+    setError(null);
+    try {
+      await invoke("open_in_vscode", { path });
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  return (
+    <div className="layout">
+      <aside className="sidebar">
+        <p className="sidebar-title">Workspaces</p>
+        <nav>
+          {PINNED.map((pinned) => (
+            <button
+              key={pinned.path}
+              className={`pinned${selected === pinned.path ? " active" : ""}`}
+              onClick={() => selectPinned(pinned)}
+            >
+              <span className="pinned-name">{pinned.name}</span>
+              {pinned.note && <span className="pinned-note">{pinned.note}</span>}
+            </button>
+          ))}
+        </nav>
+      </aside>
+
+      <main className="content">
+        <header className="header">
+          <div>
+            <h1>Switchboard</h1>
+            <p className="subtitle">
+              {selected ? selected : "Select a workspace or enter a path"}
+            </p>
+          </div>
+          <label className="on-top" title="Keep this window above others">
+            <input
+              type="checkbox"
+              checked={onTop}
+              onChange={(event) => toggleOnTop(event.target.checked)}
+            />
+            Stay on top
+          </label>
+        </header>
+
+        <form className="repo-form" onSubmit={submit}>
+          <input
+            value={repoPath}
+            onChange={(event) => setRepoPath(event.target.value)}
+            placeholder="C:\Themis"
+            spellCheck={false}
+            aria-label="Repository path"
+          />
+          <button type="submit" disabled={busy || !repoPath.trim()}>
+            {busy ? "Loading" : "Load"}
+          </button>
+        </form>
+
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+
+        {loaded && !error && worktrees.length === 0 && (
+          <p className="empty">No worktrees found.</p>
+        )}
+
+        <ul className="worktrees">
+          {worktrees.map((worktree) => (
+            <li key={worktree.path}>
+              <button className="worktree" onClick={() => openWorktree(worktree.path)}>
+                <span className="branch">{describe(worktree)}</span>
+                <span className="path">{worktree.path}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </main>
+    </div>
+  );
+}
