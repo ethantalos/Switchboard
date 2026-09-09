@@ -13,9 +13,13 @@
     "windows": [
       {
         "title": "Switchboard",
-        "width": 800,
-        "height": 600,
-        "resizable": true,
+        "width": 320,
+        "height": 320,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "shadow": false,
         "fullscreen": false
       }
     ],
@@ -32,9 +36,6 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "android": {
-      "debugApplicationIdSuffix": ".debug"
-    }
+    ]
   }
 }
