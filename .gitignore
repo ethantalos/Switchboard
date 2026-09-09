@@ -1,0 +1,51 @@
+# Dependencies and generated builds
+node_modules/
+dist/
+build/
+target/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local application state and logs
+.local/
+.local-data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# Agent/browser tooling state
+.gstack/
+.codex/
+.claude/
+CLAUDE.local.md
+.worktrees/
+
+# Python environments in development workspaces
+.venv/
+venv/
+__pycache__/
+
+# Editors and OS artifacts
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.tmp
+
+# Vite local overrides
+*.local
