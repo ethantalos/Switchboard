@@ -1,0 +1,57 @@
+:root {
+  /* Near-black shell with a faintly warm cast, so red sits on it naturally. */
+  --bg: #0b0a0c;
+  --surface: #0f0e11;
+  --border: #191315;
+  --text: #f2eff0;
+  --muted: #8f878c;
+
+  /* Red at rest is the brand; hot red is reserved for wanting attention. */
+  --brand: #c4534a;
+  --accent: #f96a5e;
+  --warn: #f0a020;
+  --ok: #3fb950;
+  --danger: #ff6b6b;
+  /* Your turn. Cool on a deliberately warm palette, so it reads as a
+     different kind of signal rather than a louder version of the same one. */
+  --wait: #5ab0e0;
+
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /*
+   * Fluent 2 motion tokens, taken from microsoft/fluentui's own
+   * packages/tokens/src/global. Windows durations are frame counts at 60Hz -
+   * 100ms is six frames, 250ms is fifteen - which is why they are not round
+   * decimal numbers.
+   */
+  --duration-faster: 100ms;
+  --duration-fast: 150ms;
+  --duration-normal: 200ms;
+  --duration-gentle: 250ms;
+
+  /*
+   * Entering decelerates, leaving accelerates, and the two are never the
+   * same length. Read the y values: decelerate reaches 0.9 progress in the
+   * first tenth of its time, so it feels instant then glides to rest;
+   * accelerate barely moves until 90% through, so it hangs then gets out of
+   * the way. Swapping them is what makes a panel feel reluctant to close.
+   */
+  --curve-decelerate: cubic-bezier(0.1, 0.9, 0.2, 1);
+  --curve-accelerate: cubic-bezier(0.9, 0.1, 1, 0.2);
+  --curve-easy-ease: cubic-bezier(0.33, 0, 0.67, 1);
+
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: transparent;
+  color: var(--text);
+}
