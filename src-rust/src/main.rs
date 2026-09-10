@@ -886,6 +886,16 @@ pub struct Session {
 #[derive(Default)]
 pub struct SessionStore(Mutex<HashMap<String, Session>>);
 
+/// Sessions that ended properly, and when.
+///
+/// A transcript keeps its last-written time after the session exits, so the
+/// disk scan would otherwise resurrect anything that ended recently and show
+/// it as working forever. SessionEnd is the one unambiguous signal that a
+/// session is gone; it has to outlive the session record itself, or the scan
+/// simply puts it back.
+#[derive(Default)]
+pub struct Ended(Mutex<HashMap<String, u64>>);
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1082,7 +1092,11 @@ fn transcript_cwd(path: &Path) -> Option<String> {
 /// Only files sitting directly in a project directory are sessions; the
 /// `<session>/subagents/` tree underneath holds the agents a session spawned,
 /// which are not sessions of their own.
-fn scan_transcripts(home: &Path, now: u64) -> Vec<Transcript> {
+fn scan_transcripts(
+    home: &Path,
+    now: u64,
+    cwds: &mut HashMap<std::path::PathBuf, String>,
+) -> Vec<Transcript> {
     let root = home.join(".claude").join("projects");
     let Ok(projects) = std::fs::read_dir(&root) else {
         return Vec::new();
@@ -1113,8 +1127,18 @@ fn scan_transcripts(home: &Path, now: u64) -> Vec<Transcript> {
             if now.saturating_sub(last_write) > TRANSCRIPT_WINDOW_MS {
                 continue;
             }
-            let Some(cwd) = transcript_cwd(&path) else {
-                continue;
+            // A session's starting directory never changes, so read it once
+            // and remember it. Otherwise every live transcript is reopened
+            // every five seconds for a value that cannot have moved.
+            let cwd = match cwds.get(&path) {
+                Some(known) => known.clone(),
+                None => {
+                    let Some(found) = transcript_cwd(&path) else {
+                        continue;
+                    };
+                    cwds.insert(path.clone(), found.clone());
+                    found
+                }
             };
 
             found.push(Transcript {
@@ -1162,12 +1186,19 @@ fn keep_current(found: Vec<Transcript>, now: u64) -> Vec<Transcript> {
 /// Returns true when anything changed.
 fn merge_transcripts(
     sessions: &mut HashMap<String, Session>,
+    ended: &HashMap<String, u64>,
     found: &[Transcript],
     now: u64,
 ) -> bool {
     let mut changed = false;
 
     for t in found {
+        // It said goodbye. Its transcript still looks freshly written, but
+        // bringing it back would leave a session that no longer exists
+        // sitting there claiming to be working.
+        if ended.contains_key(&t.session_id) {
+            continue;
+        }
         let active = now.saturating_sub(t.last_write) < TRANSCRIPT_ACTIVE_MS;
 
         match sessions.get_mut(&t.session_id) {
@@ -1216,12 +1247,18 @@ fn start_transcript_watch(app: AppHandle) {
             log::warn!("No home directory; cannot read session transcripts");
             return;
         };
+        // Path -> starting directory, so each transcript head is read once.
+        let mut cwds: HashMap<std::path::PathBuf, String> = HashMap::new();
         loop {
             let now = now_ms();
-            let found = scan_transcripts(&home, now);
+            let found = scan_transcripts(&home, now, &mut cwds);
             let store = app.state::<SessionStore>();
             let mut sessions = store.0.lock().unwrap();
-            if merge_transcripts(&mut sessions, &found, now) {
+            let ended = app.state::<Ended>();
+            let mut ended = ended.0.lock().unwrap();
+            // Forget the tombstones once no scan could reach them anyway.
+            ended.retain(|_, at| now.saturating_sub(*at) < TRANSCRIPT_WINDOW_MS);
+            if merge_transcripts(&mut sessions, &ended, &found, now) {
                 let _ = app.emit("sessions-changed", snapshot(&sessions));
             }
             drop(sessions);
@@ -1245,7 +1282,11 @@ fn start_session_reaper(app: AppHandle) {
 }
 
 /// Apply one hook payload to the store. Returns true when something changed.
-fn apply_hook(sessions: &mut HashMap<String, Session>, body: &str) -> bool {
+fn apply_hook(
+    sessions: &mut HashMap<String, Session>,
+    ended: &mut HashMap<String, u64>,
+    body: &str,
+) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return false;
     };
@@ -1258,6 +1299,7 @@ fn apply_hook(sessions: &mut HashMap<String, Session>, body: &str) -> bool {
     };
 
     if event == "SessionEnd" {
+        ended.insert(session_id.to_string(), now_ms());
         return sessions.remove(session_id).is_some();
     }
 
@@ -1323,7 +1365,11 @@ fn start_hook_listener(app: AppHandle) {
             let changed = {
                 let store = app.state::<SessionStore>();
                 let mut sessions = store.0.lock().unwrap();
-                let changed = apply_hook(&mut sessions, &body);
+                // Bind the state before locking; the guard cannot outlive a
+                // temporary.
+                let tombstones = app.state::<Ended>();
+                let mut ended = tombstones.0.lock().unwrap();
+                let changed = apply_hook(&mut sessions, &mut ended, &body);
                 if changed {
                     let _ = app.emit("sessions-changed", snapshot(&sessions));
                 }
@@ -1664,6 +1710,7 @@ fn main() {
         .manage(HookLog::default())
         .manage(OrderStore::default())
         .manage(Pinned::default())
+        .manage(Ended::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -1853,7 +1900,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let body = r#"{"hook_event_name":"Notification","session_id":"s1",
                        "cwd":"C:/Switchboard","message":"needs your permission"}"#;
-        assert!(apply_hook(&mut sessions, body));
+        assert!(apply_hook(&mut sessions, &mut HashMap::new(), body));
         let s = &sessions["s1"];
         assert_eq!(s.state, "needs_you");
         assert_eq!(s.detail.as_deref(), Some("needs your permission"));
@@ -1862,16 +1909,16 @@ mod tests {
     #[test]
     fn session_end_removes_and_is_idempotent() {
         let mut sessions = HashMap::new();
-        apply_hook(&mut sessions, r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:/x"}"#);
-        assert!(apply_hook(&mut sessions, r#"{"hook_event_name":"SessionEnd","session_id":"s1"}"#));
-        assert!(!apply_hook(&mut sessions, r#"{"hook_event_name":"SessionEnd","session_id":"s1"}"#));
+        apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:/x"}"#);
+        assert!(apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"SessionEnd","session_id":"s1"}"#));
+        assert!(!apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"SessionEnd","session_id":"s1"}"#));
     }
 
     #[test]
     fn a_later_event_without_cwd_keeps_the_one_we_know() {
         let mut sessions = HashMap::new();
-        apply_hook(&mut sessions, r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:/Themis B"}"#);
-        apply_hook(&mut sessions, r#"{"hook_event_name":"Stop","session_id":"s1"}"#);
+        apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:/Themis B"}"#);
+        apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"Stop","session_id":"s1"}"#);
         assert_eq!(sessions["s1"].cwd, "C:/Themis B");
         assert_eq!(sessions["s1"].state, "waiting");
     }
@@ -1938,7 +1985,7 @@ mod tests {
             "effort": "high"
         }"#;
         let mut sessions = HashMap::new();
-        assert!(apply_hook(&mut sessions, body));
+        assert!(apply_hook(&mut sessions, &mut HashMap::new(), body));
         let s = &sessions["e091acf2-0000-0000-0000-000000000000"];
         assert_eq!(s.state, "waiting");
         assert_eq!(s.detail.as_deref(), Some("Just says \"hello\""));
@@ -1968,7 +2015,7 @@ mod tests {
             last_write: now - 5_000,
         }];
 
-        assert!(merge_transcripts(&mut sessions, &found, now));
+        assert!(merge_transcripts(&mut sessions, &HashMap::new(), &found, now));
         let s = &sessions["themis-b"];
         // Being written to right now means the turn is still moving.
         assert_eq!(s.state, "working");
@@ -1984,7 +2031,7 @@ mod tests {
             cwd: "c:/Themis".to_string(),
             last_write: now - 30 * 60 * 1000,
         }];
-        merge_transcripts(&mut sessions, &found, now);
+        merge_transcripts(&mut sessions, &HashMap::new(), &found, now);
         // Disk knows it exists and when it last moved, not what it is doing.
         assert_eq!(sessions["old"].state, "unknown");
     }
@@ -2002,7 +2049,7 @@ mod tests {
             last_write: now - 2_000,
         }];
 
-        assert!(merge_transcripts(&mut sessions, &found, now));
+        assert!(merge_transcripts(&mut sessions, &HashMap::new(), &found, now));
         assert_eq!(sessions["s"].state, "working");
         assert_eq!(sessions["s"].updated_at, now - 2_000);
     }
@@ -2020,7 +2067,7 @@ mod tests {
             last_write: now - 500,
         }];
 
-        merge_transcripts(&mut sessions, &found, now);
+        merge_transcripts(&mut sessions, &HashMap::new(), &found, now);
         assert_eq!(sessions["s"].state, "waiting", "a stop tail is not new work");
     }
 
@@ -2035,7 +2082,7 @@ mod tests {
             last_write: now - 3_000,
         }];
 
-        merge_transcripts(&mut sessions, &found, now);
+        merge_transcripts(&mut sessions, &HashMap::new(), &found, now);
         assert_eq!(sessions["s"].state, "working");
     }
 
@@ -2050,7 +2097,7 @@ mod tests {
             last_write: now - 1_000,
         }];
 
-        merge_transcripts(&mut sessions, &found, now);
+        merge_transcripts(&mut sessions, &HashMap::new(), &found, now);
         assert_eq!(sessions["s"].state, "needs_you");
     }
 
@@ -2065,12 +2112,12 @@ mod tests {
         assert!(!is_inside(r"C:\Switchboard", r"C:\Switchboard\src-rust"));
 
         let mut sessions = HashMap::new();
-        apply_hook(&mut sessions, r#"{"hook_event_name":"SessionStart","session_id":"s","cwd":"C:/Switchboard"}"#);
-        apply_hook(&mut sessions, r#"{"hook_event_name":"PostToolUse","session_id":"s","cwd":"C:/Switchboard/src-rust","tool_name":"Bash"}"#);
+        apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"SessionStart","session_id":"s","cwd":"C:/Switchboard"}"#);
+        apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"PostToolUse","session_id":"s","cwd":"C:/Switchboard/src-rust","tool_name":"Bash"}"#);
         assert_eq!(sessions["s"].cwd, "C:/Switchboard");
 
         // Moving genuinely elsewhere still updates.
-        apply_hook(&mut sessions, r#"{"hook_event_name":"PostToolUse","session_id":"s","cwd":"C:/Themis","tool_name":"Bash"}"#);
+        apply_hook(&mut sessions, &mut HashMap::new(), r#"{"hook_event_name":"PostToolUse","session_id":"s","cwd":"C:/Themis","tool_name":"Bash"}"#);
         assert_eq!(sessions["s"].cwd, "C:/Themis");
     }
 
@@ -2102,5 +2149,50 @@ mod tests {
         assert!(kept.contains(&"newest-cold".to_string()));
         assert!(!kept.contains(&"older".to_string()), "superseded history is noise");
         assert!(!kept.contains(&"ancient".to_string()));
+    }
+
+    #[test]
+    fn a_session_that_said_goodbye_is_not_resurrected_from_disk() {
+        // Caught by running a real `claude -p` session end to end: the hooks
+        // were all correct and SessionEnd removed it, then the transcript
+        // scan put it straight back as "working", because the file still
+        // looked freshly written. A finished session became a permanent
+        // ghost claiming to be busy.
+        let now = 100_000_000;
+        let mut sessions = HashMap::new();
+        let mut ended = HashMap::new();
+
+        apply_hook(
+            &mut sessions,
+            &mut ended,
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"lab","cwd":"c:/lab/alpha","prompt":"go"}"#,
+        );
+        assert_eq!(sessions["lab"].state, "working");
+
+        apply_hook(
+            &mut sessions,
+            &mut ended,
+            r#"{"hook_event_name":"SessionEnd","session_id":"lab","reason":"other"}"#,
+        );
+        assert!(sessions.is_empty(), "SessionEnd removes it");
+        assert!(ended.contains_key("lab"), "and is remembered");
+
+        // The transcript is still there, written seconds ago.
+        let found = vec![Transcript {
+            session_id: "lab".to_string(),
+            cwd: "c:/lab/alpha".to_string(),
+            last_write: now - 2_000,
+        }];
+        assert!(!merge_transcripts(&mut sessions, &ended, &found, now));
+        assert!(sessions.is_empty(), "and it stays gone");
+
+        // A session that never said goodbye is still discovered.
+        let other = vec![Transcript {
+            session_id: "still-running".to_string(),
+            cwd: "c:/lab/beta".to_string(),
+            last_write: now - 2_000,
+        }];
+        assert!(merge_transcripts(&mut sessions, &ended, &other, now));
+        assert_eq!(sessions["still-running"].state, "working");
     }
 }

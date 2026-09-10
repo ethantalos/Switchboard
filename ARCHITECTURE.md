@@ -90,6 +90,11 @@ files survive restarts.
    keeps the clock honest so a long turn is not mistaken for silence. Writing
    more than 15 seconds after the last hook is treated as a turn that was
    missed, because a `Stop` writes its own tail a moment after firing.
+5. A transcript keeps its last-written time after the session exits, so
+   `SessionEnd` is remembered separately and the scan refuses to resurrect
+   anything that said goodbye. Without that, every finished session came back
+   as a permanent ghost claiming to be working - found by running a real
+   `claude -p` session end to end, not by reading the code.
 
 A session silent for 30 minutes is dimmed and left out of the badge count;
 one silent for 12 hours is dropped, since a closed window fires no
