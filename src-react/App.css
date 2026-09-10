@@ -3,49 +3,27 @@
  * and stays transparent; only .box is painted. Growing is a CSS transition, so
  * there is no window geometry change to flicker, drift, or race.
  */
+/*
+ * The window is a fixed 320x320 and never moves or resizes. Two surfaces sit
+ * stacked in the same grid cell - the 60px badge and the full panel - and
+ * hovering cross-fades between them. Neither ever changes its own box size,
+ * so nothing lays out mid-animation.
+ *
+ * Both stay mounted on purpose. Unmounting the panel on collapse would delete
+ * the node on the first frame of the exit, so the close could never animate.
+ *
+ * Durations and curves are Fluent 2's own tokens. Entering decelerates over
+ * 250ms, leaving accelerates over 200ms; Windows never uses the same curve or
+ * the same length in both directions.
+ */
 .stage {
+  display: grid;
+  place-items: center;
   height: 100vh;
   width: 100vw;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   background: transparent;
-}
-
-.box {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border-radius: 12px;
-  background: var(--surface);
-  border: 0.75px solid currentColor;
-  box-shadow: 0 6px 20px rgb(0 0 0 / 45%);
-  cursor: grab;
-  user-select: none;
   --status: var(--brand);
   color: var(--status);
-  transition:
-    width 120ms ease-out,
-    height 120ms ease-out,
-    color 180ms ease-out,
-    border-color 180ms ease-out,
-    box-shadow 180ms ease-out;
-}
-
-.box:active {
-  cursor: grabbing;
-}
-
-.box.collapsed {
-  width: 60px;
-  height: 60px;
-}
-
-.box.expanded {
-  width: 320px;
-  height: 320px;
 }
 
 /*
@@ -54,20 +32,110 @@
  * for the digit, and currentColor resolves against that, so it would paint
  * itself dark-on-dark.
  */
-.box.needs_you {
+.stage.needs_you {
   --status: var(--accent);
+}
+
+.stage.working {
+  --status: var(--warn);
+}
+
+.stage.waiting {
+  --status: var(--wait);
+}
+
+.stage.failed {
+  --status: var(--danger);
+}
+
+.badge,
+.surface {
+  grid-area: 1 / 1;
+  position: relative;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid currentColor;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 45%);
+  cursor: grab;
+  user-select: none;
+  transform-origin: center;
+  /*
+   * Rasterise once and transform the layer, instead of re-rasterising text at
+   * fractional positions every frame. Only these two elements get it; a layer
+   * per list row would be six render surfaces for a 200ms fade.
+   */
+  will-change: transform, opacity;
+  /* Colour settles at rest, so it never collides with the scale. */
+  transition:
+    color var(--duration-fast) var(--curve-easy-ease),
+    border-color var(--duration-fast) var(--curve-easy-ease);
+}
+
+.badge:active,
+.surface:active {
+  cursor: grabbing;
+}
+
+.badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 60px;
+  overflow: hidden;
+}
+
+.stage.needs_you .badge {
   box-shadow:
     0 6px 20px rgb(0 0 0 / 45%),
     0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
     0 0 18px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-.box.working {
-  --status: var(--warn);
+.surface {
+  display: flex;
+  width: 320px;
+  height: 320px;
+  overflow: hidden;
 }
 
-.box.done {
-  --status: var(--ok);
+/*
+ * Collapsed is the panel's resting exit state, so the base rule carries the
+ * exit and the .is-expanded rule carries the entrance. That is how one
+ * element gets a different curve per direction in plain CSS.
+ */
+.surface {
+  opacity: 0;
+  transform: scale(0.9);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--duration-normal) var(--curve-accelerate),
+    transform var(--duration-normal) var(--curve-accelerate),
+    visibility 0s linear var(--duration-normal);
+}
+
+.stage.is-expanded .surface {
+  opacity: 1;
+  transform: scale(1);
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity var(--duration-gentle) var(--curve-decelerate),
+    transform var(--duration-gentle) var(--curve-decelerate),
+    visibility 0s;
+}
+
+/* The badge pushes slightly through the viewer as the panel takes over. */
+.stage.is-expanded .badge {
+  opacity: 0;
+  transform: scale(1.08);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--duration-faster) var(--curve-accelerate),
+    transform var(--duration-faster) var(--curve-accelerate),
+    visibility 0s linear var(--duration-faster);
 }
 
 /*
@@ -100,10 +168,6 @@
   line-height: 0.9375rem;
   text-align: center;
   font-variant-numeric: tabular-nums;
-}
-
-.box.expanded .count {
-  display: none;
 }
 
 /*
@@ -274,16 +338,55 @@
   background: var(--warn);
 }
 
-.done > .dot {
-  background: var(--ok);
+.waiting > .dot {
+  background: var(--wait);
+}
+
+.failed > .dot {
+  background: var(--danger);
 }
 
 .session .state {
   color: var(--text);
+  /* The label is the one thing that must never wrap onto a second line. */
+  flex: none;
+  white-space: nowrap;
 }
 
 .session.needs_you .state {
   color: var(--accent);
+}
+
+.session.waiting .state {
+  color: var(--wait);
+}
+
+.session.failed .state {
+  color: var(--danger);
+}
+
+/*
+ * Nothing has been heard from this session in a while. Kept visible, because
+ * it may just be a window left open, but pushed into the background so it
+ * cannot be mistaken for something wanting attention.
+ */
+.quiet {
+  opacity: 0.42;
+}
+
+.quiet > .dot {
+  box-shadow: none;
+}
+
+/* Why a session wants you, straight from the Notification payload. */
+.detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.6875rem;
+  color: var(--muted);
 }
 
 .sid {
@@ -294,6 +397,7 @@
 
 .time {
   margin-left: auto;
+  padding-left: 0.375rem;
   font-size: 0.6875rem;
   color: var(--muted);
   font-family: var(--mono);
@@ -318,4 +422,57 @@
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   border-radius: 6px;
   word-break: break-word;
+}
+
+/*
+ * Content enters behind its container, not with it. Fluent staggers the
+ * container and the content by a full duration step; the rows then follow
+ * each other by a short offset. The rise is deliberately tiny - the sense of
+ * movement comes from the curve, not the distance.
+ */
+.worktree {
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity var(--duration-normal) var(--curve-decelerate),
+    transform var(--duration-normal) var(--curve-decelerate);
+}
+
+.stage.is-expanded .worktree {
+  opacity: 1;
+  transform: none;
+  /* Capped in the markup, so a long list cannot trail on forever. */
+  transition-delay: calc(var(--duration-faster) + var(--i, 0) * 30ms);
+}
+
+.empty {
+  transition: opacity var(--duration-normal) var(--curve-decelerate)
+    var(--duration-faster);
+}
+
+.stage:not(.is-expanded) .empty {
+  opacity: 0;
+}
+
+/*
+ * Reduced motion means no movement, not no feedback. Killing the transitions
+ * outright makes state changes read as glitches, so the cross-fade stays and
+ * only the travel and the stagger go.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .badge,
+  .surface,
+  .worktree {
+    transition-property: opacity;
+    transition-duration: var(--duration-faster);
+    transition-timing-function: var(--curve-easy-ease);
+    transition-delay: 0s;
+  }
+
+  .stage.is-expanded .badge,
+  .stage.is-expanded .surface,
+  .stage.is-expanded .worktree,
+  .worktree {
+    transform: none;
+  }
 }

@@ -41,7 +41,59 @@ VS Code extension, so Switchboard sees sessions it never started.
 4. Each change emits `sessions-changed` to the frontend.
 
 `cwd` is the join key: the widget groups sessions by it, and a worktree takes
-the state of its most urgent session. Paths are compared case-insensitively
+the state of its most urgent session. Hook payloads carry the process's
+*current* directory, so a session that cd's into a subfolder would appear as a
+second worktree; a deeper path never replaces one already known.
+
+States are named for what they ask of you, not for what the assistant did:
+
+| state | meaning | from |
+| --- | --- | --- |
+| `needs_you` | blocked on you | `PermissionRequest`, blocking `Notification` |
+| `failed` | ended badly | `StopFailure` |
+| `waiting` | finished its turn, your move | `Stop`, idle `Notification` |
+| `working` | mid-turn | `UserPromptSubmit`, `PostToolUse`, `SubagentStop` |
+| `idle` | just started | `SessionStart` |
+| `unknown` | known to exist, state unknown | disk or an IDE lock |
+
+`Stop` used to map to "done", painted green. That is the single most useful
+state - the session is sitting there waiting for its human - and it was being
+reported as nothing to see here.
+
+Detail text comes from whichever field the event actually carries: there is no
+common `message` field. `Stop` has `last_assistant_message`,
+`UserPromptSubmit` has `prompt`, tool events have `tool_name`, and
+`Notification` has `notification_type` rather than prose. An `idle_prompt`
+notification is not treated as blocking - Claude Code fires one about a minute
+after finishing, and painting that red teaches you to ignore the badge.
+
+## Sessions Switchboard never saw start
+Hooks only describe sessions that fire while Switchboard is running, and the
+store is in memory, so a restart forgot everything and a session was invisible
+until it happened to emit. Worse, a long turn emits nothing at all between the
+prompt and the stop, so an agent that had been working for an hour looked
+silent.
+
+Transcripts fix both. Claude Code appends to
+`~/.claude/projects/<slug>/<session-id>.jsonl` throughout a turn, and the
+files survive restarts.
+
+1. Every five seconds the transcript directory is scanned. Files sit directly
+   in a project directory; the `<session>/subagents/` tree below holds agents a
+   session spawned, not sessions.
+2. `cwd` is read from the first user entry, within the first 40 lines - these
+   files reach hundreds of thousands of lines.
+3. Every worktree keeps every transcript it has ever had, so a raw scan
+   resurrects months of dead sessions. Anything still being written is kept,
+   plus the newest per worktree.
+4. Hooks own state; disk only supplies sessions hooks never mentioned and
+   keeps the clock honest so a long turn is not mistaken for silence. Writing
+   more than 15 seconds after the last hook is treated as a turn that was
+   missed, because a `Stop` writes its own tail a moment after firing.
+
+A session silent for 30 minutes is dimmed and left out of the badge count;
+one silent for 12 hours is dropped, since a closed window fires no
+`SessionEnd`. Paths are compared case-insensitively
 with separators normalised, because hooks report `C:\Switchboard` while IDE
 locks report `c:\Switchboard`.
 
@@ -142,6 +194,8 @@ The frontend has no OS access; it calls Rust through `invoke`.
 | `list_workspaces()` | Editors with Claude Code attached, from `~/.claude/ide` |
 | `list_parked()` | Worktrees currently filling a monitor, which a click can send back |
 | `hook_endpoint()` | The URL hooks should POST to |
+| `quiet_after_ms()` | How long before a silent session is dimmed |
+| `recent_hooks()` | The last 200 hook deliveries, for diagnosing silence |
 | `connect_claude_code()` | Adds Switchboard's hooks to `~/.claude/settings.json`, appending to what is there and backing the file up first |
 | `open_settings()` / `close_settings()` | The settings window |
 | `close_widget()` | The widget has no title bar |

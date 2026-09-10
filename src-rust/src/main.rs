@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
@@ -586,9 +586,13 @@ fn start_hover_watch(app: AppHandle) {
 }
 
 /// Hook events Switchboard needs in order to track session state.
-const HOOK_EVENTS: [&str; 7] = [
+const HOOK_EVENTS: [&str; 9] = [
     "SessionStart",
     "UserPromptSubmit",
+    // A long turn is silent between the prompt and the stop, so tool events
+    // are what keep "working" honest instead of letting it look hung.
+    "PostToolUse",
+    "SubagentStop",
     "Stop",
     "StopFailure",
     "Notification",
@@ -764,6 +768,71 @@ fn set_always_on_top(window: tauri::Window, enabled: bool) -> Result<(), String>
         .map_err(|e| format!("Could not change window layering: {e}"))
 }
 
+/// One hook delivery, kept so the settings window can show what actually
+/// arrived. "The hooks don't work" is impossible to diagnose from a widget
+/// that only ever shows its conclusions.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookRecord {
+    at: u64,
+    event: String,
+    session_id: String,
+    cwd: String,
+    /// What the widget did with it: applied, or why it was ignored.
+    outcome: String,
+    /// The fields present on the payload, so a schema change is visible
+    /// rather than silently dropping information.
+    fields: Vec<String>,
+}
+
+/// Most recent deliveries, newest last.
+#[derive(Default)]
+pub struct HookLog(Mutex<VecDeque<HookRecord>>);
+
+/// Enough to cover a couple of turns without growing without bound.
+const HOOK_LOG_LIMIT: usize = 200;
+
+fn record_hook(app: &AppHandle, body: &str, outcome: &str) {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok();
+    let get = |key: &str| {
+        value
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut fields: Vec<String> = value
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    fields.sort();
+
+    let record = HookRecord {
+        at: now_ms(),
+        event: get("hook_event_name"),
+        session_id: get("session_id"),
+        cwd: get("cwd"),
+        outcome: outcome.to_string(),
+        fields,
+    };
+
+    let log = app.state::<HookLog>();
+    let mut entries = log.0.lock().unwrap();
+    if entries.len() >= HOOK_LOG_LIMIT {
+        entries.pop_front();
+    }
+    entries.push_back(record);
+}
+
+/// Recent hook deliveries, newest last. Drives the settings window's
+/// diagnostics, and answers "is Claude Code actually talking to me".
+#[tauri::command]
+fn recent_hooks(log: tauri::State<HookLog>) -> Vec<HookRecord> {
+    log.0.lock().unwrap().iter().cloned().collect()
+}
+
 /// A Claude Code session, as reported by its hooks. Sessions are keyed by
 /// session_id and live only in memory; restarting Switchboard forgets them.
 #[derive(Clone, Debug, Serialize)]
@@ -786,16 +855,353 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// How much of a message the widget can usefully show on one row.
+const DETAIL_CHARS: usize = 140;
+
+/// First line, whitespace collapsed, clipped. Assistant messages are markdown
+/// paragraphs; a row has one line.
+fn one_line(text: &str, limit: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    let clipped: String = flat.chars().take(limit).collect();
+    match clipped.rsplit_once(' ') {
+        Some((head, _)) if head.chars().count() > limit / 2 => format!("{head}..."),
+        _ => format!("{clipped}..."),
+    }
+}
+
+/// Is `inner` the same directory as `outer`, or somewhere beneath it?
+///
+/// Windows paths arrive with either separator and either case, so both are
+/// normalised before comparing.
+fn is_inside(inner: &str, outer: &str) -> bool {
+    let norm = |p: &str| {
+        p.replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
+    let (inner, outer) = (norm(inner), norm(outer));
+    inner == outer || inner.starts_with(&format!("{outer}/"))
+}
+
+/// A one-line summary of what just happened, from whichever field the event
+/// actually carries.
+///
+/// There is no single `message` field. Verified against live payloads from
+/// Claude Code 2.1.267: `Stop` carries `last_assistant_message`,
+/// `UserPromptSubmit` carries `prompt`, and `Notification` carries
+/// `notification_type` rather than prose.
+fn detail_for(event: &str, value: &serde_json::Value) -> Option<String> {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+    };
+
+    let picked = match event {
+        // What it last said - the reason you would go back to this session.
+        "Stop" | "StopFailure" => text("last_assistant_message"),
+        // What it is working on.
+        "UserPromptSubmit" => text("prompt"),
+        "Notification" => {
+            // The row already says "needs you"; repeating the machine name
+            // for it is noise. Only say something the state does not.
+            return text("message")
+                .map(|m| one_line(m, DETAIL_CHARS))
+                .or_else(|| notification_reason(value));
+        }
+        "PermissionRequest" | "PreToolUse" | "PostToolUse" => text("tool_name"),
+        "SubagentStop" => text("agent_type"),
+        _ => None,
+    }?;
+
+    Some(one_line(picked, DETAIL_CHARS))
+}
+
+/// Plain English for a notification kind, or nothing when the state label
+/// already says it.
+fn notification_reason(value: &serde_json::Value) -> Option<String> {
+    let kind = value.get("notification_type").and_then(|v| v.as_str())?;
+    Some(match kind {
+        "permission_prompt" => "waiting on permission".to_string(),
+        "agent_needs_input" => "needs input".to_string(),
+        "elicitation_dialog" | "elicitation_url_dialog" => "asking you something".to_string(),
+        // "your turn" already covers this one.
+        "idle_prompt" => return None,
+        // Something new. Show it rather than hide it, just tidied up.
+        other => other.replace('_', " "),
+    })
+}
+
+/// Notifications that mean "I am blocked on you" rather than "I have been
+/// sitting here a while".
+///
+/// Claude Code fires an idle notification about a minute after it finishes a
+/// turn. Treating that as a blocking prompt turned the badge red for sessions
+/// that simply had nothing to do, which is the fastest way to train someone
+/// to ignore it.
+fn notification_blocks(value: &serde_json::Value) -> bool {
+    match value.get("notification_type").and_then(|v| v.as_str()) {
+        Some("idle_prompt") => false,
+        // Unknown kinds are treated as blocking: a missed prompt is worse
+        // than an extra one.
+        _ => true,
+    }
+}
+
 /// Map a hook event onto the state the widget shows. Events we do not care
 /// about return None and leave the session untouched.
-fn state_for(event: &str) -> Option<&'static str> {
+///
+/// `Stop` is the one worth thinking about. It fires when the assistant
+/// finishes replying, which means the session is now sitting there waiting
+/// for its human - not that the work is done. Calling that "done" and
+/// painting it green said "nothing to see here" about the sessions most
+/// likely to want you, which is the opposite of what this widget is for.
+fn state_for(event: &str, value: &serde_json::Value) -> Option<&'static str> {
     match event {
         "SessionStart" => Some("idle"),
-        "UserPromptSubmit" => Some("working"),
-        "Notification" | "PermissionRequest" => Some("needs_you"),
-        "Stop" | "StopFailure" => Some("done"),
+        // Anything that proves the turn is still moving.
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SubagentStop" => Some("working"),
+        "PermissionRequest" => Some("needs_you"),
+        "Notification" => Some(if notification_blocks(value) {
+            "needs_you"
+        } else {
+            "waiting"
+        }),
+        "Stop" => Some("waiting"),
+        "StopFailure" => Some("failed"),
         _ => None,
     }
+}
+
+/// A session with no hook traffic for this long is treated as quiet: shown,
+/// but dimmed and left out of the badge count.
+const QUIET_AFTER_MS: u64 = 30 * 60 * 1000;
+
+/// Sessions die without warning - a closed VS Code window or a killed
+/// terminal fires no SessionEnd - so anything this old is dropped outright.
+const FORGET_AFTER_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// How often to re-check for sessions that have gone silent.
+const PRUNE_EVERY_MS: u64 = 60 * 1000;
+
+/// Drop sessions that have been silent long enough to be certainly gone.
+/// Returns true when something was removed.
+fn prune_dead(sessions: &mut HashMap<String, Session>, now: u64) -> bool {
+    let before = sessions.len();
+    sessions.retain(|_, s| now.saturating_sub(s.updated_at) < FORGET_AFTER_MS);
+    sessions.len() != before
+}
+
+/// How far back a transcript is worth reading at all.
+const TRANSCRIPT_WINDOW_MS: u64 = 4 * 60 * 60 * 1000;
+/// Written this recently means the turn is still moving.
+const TRANSCRIPT_ACTIVE_MS: u64 = 90 * 1000;
+/// A Stop writes its own last lines, so writes within this long after the
+/// last hook are that hook's own tail rather than new work.
+const TRANSCRIPT_GRACE_MS: u64 = 15 * 1000;
+/// How often to re-read the transcript directory.
+const TRANSCRIPT_SCAN_MS: u64 = 5000;
+/// The cwd is on the first user line; no need to read further.
+const TRANSCRIPT_HEAD_LINES: usize = 40;
+
+/// A session found on disk rather than announced by a hook.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transcript {
+    session_id: String,
+    cwd: String,
+    last_write: u64,
+}
+
+/// The working directory a session started in.
+///
+/// Only the first few lines are read: Claude Code puts `cwd` on the first
+/// user entry, and transcripts run to hundreds of thousands of lines.
+fn transcript_cwd(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    for line in BufReader::new(file).lines().take(TRANSCRIPT_HEAD_LINES) {
+        let Ok(line) = line else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = value.get("cwd").and_then(|v| v.as_str()) {
+            if !cwd.is_empty() {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Sessions with recent transcript activity.
+///
+/// Only files sitting directly in a project directory are sessions; the
+/// `<session>/subagents/` tree underneath holds the agents a session spawned,
+/// which are not sessions of their own.
+fn scan_transcripts(home: &Path, now: u64) -> Vec<Transcript> {
+    let root = home.join(".claude").join("projects");
+    let Ok(projects) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    for project in projects.flatten() {
+        let Ok(entries) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+
+            let last_write = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+
+            if now.saturating_sub(last_write) > TRANSCRIPT_WINDOW_MS {
+                continue;
+            }
+            let Some(cwd) = transcript_cwd(&path) else {
+                continue;
+            };
+
+            found.push(Transcript {
+                session_id: session_id.to_string(),
+                cwd,
+                last_write,
+            });
+        }
+    }
+
+    keep_current(found, now)
+}
+
+/// Reduce a directory full of history to the sessions worth showing.
+///
+/// Every transcript a worktree has ever had lives in the same folder, so a
+/// raw scan resurrects months of dead sessions. Keep anything still being
+/// written - concurrent sessions in one worktree are real - plus the newest
+/// per worktree, which is the one you would actually return to.
+fn keep_current(found: Vec<Transcript>, now: u64) -> Vec<Transcript> {
+    let mut newest: HashMap<String, u64> = HashMap::new();
+    for t in &found {
+        let key = t.cwd.replace('\\', "/").to_lowercase();
+        let slot = newest.entry(key).or_insert(0);
+        *slot = (*slot).max(t.last_write);
+    }
+
+    found
+        .into_iter()
+        .filter(|t| {
+            let active = now.saturating_sub(t.last_write) < TRANSCRIPT_ACTIVE_MS;
+            let key = t.cwd.replace('\\', "/").to_lowercase();
+            active || newest.get(&key) == Some(&t.last_write)
+        })
+        .collect()
+}
+
+/// Fold what is on disk into what the hooks have said.
+///
+/// Hooks describe transitions precisely but only while Switchboard is
+/// running, and a long turn fires nothing at all between the prompt and the
+/// stop. Transcripts are the opposite: no state, but they survive a restart
+/// and they are written throughout a turn. Together they cover each other.
+///
+/// Returns true when anything changed.
+fn merge_transcripts(
+    sessions: &mut HashMap<String, Session>,
+    found: &[Transcript],
+    now: u64,
+) -> bool {
+    let mut changed = false;
+
+    for t in found {
+        let active = now.saturating_sub(t.last_write) < TRANSCRIPT_ACTIVE_MS;
+
+        match sessions.get_mut(&t.session_id) {
+            // Already known from hooks. Hooks own the state; disk only keeps
+            // the clock honest so a long turn is not mistaken for silence.
+            Some(session) => {
+                if t.last_write > session.updated_at {
+                    // Writing well after the last hook means a turn is under
+                    // way that we never saw start.
+                    let overdue = t.last_write - session.updated_at > TRANSCRIPT_GRACE_MS;
+                    if overdue && active && session.state != "needs_you" {
+                        session.state = "working";
+                    }
+                    session.updated_at = t.last_write;
+                    changed = true;
+                }
+            }
+            // Never heard of it. This is the session that started before
+            // Switchboard did, or survived its restart.
+            None => {
+                sessions.insert(
+                    t.session_id.clone(),
+                    Session {
+                        session_id: t.session_id.clone(),
+                        cwd: t.cwd.clone(),
+                        // Disk says it exists and when it last moved. It
+                        // cannot say what it is doing, so do not pretend.
+                        state: if active { "working" } else { "unknown" },
+                        detail: None,
+                        updated_at: t.last_write,
+                    },
+                );
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}
+
+/// Watch the transcript directory so sessions Switchboard never saw start
+/// still show up, and long turns keep looking alive.
+fn start_transcript_watch(app: AppHandle) {
+    std::thread::spawn(move || {
+        let Ok(home) = app.path().home_dir() else {
+            log::warn!("No home directory; cannot read session transcripts");
+            return;
+        };
+        loop {
+            let now = now_ms();
+            let found = scan_transcripts(&home, now);
+            let store = app.state::<SessionStore>();
+            let mut sessions = store.0.lock().unwrap();
+            if merge_transcripts(&mut sessions, &found, now) {
+                let _ = app.emit("sessions-changed", snapshot(&sessions));
+            }
+            drop(sessions);
+            std::thread::sleep(Duration::from_millis(TRANSCRIPT_SCAN_MS));
+        }
+    });
+}
+
+/// Forget sessions nothing has been heard from in half a day, and keep the
+/// frontend's idea of "quiet" honest by re-emitting on a slow tick.
+fn start_session_reaper(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(PRUNE_EVERY_MS));
+        let store = app.state::<SessionStore>();
+        let mut sessions = store.0.lock().unwrap();
+        if prune_dead(&mut sessions, now_ms()) {
+            log::info!("Forgot sessions with no traffic for 12h");
+            let _ = app.emit("sessions-changed", snapshot(&sessions));
+        }
+    });
 }
 
 /// Apply one hook payload to the store. Returns true when something changed.
@@ -815,17 +1221,26 @@ fn apply_hook(sessions: &mut HashMap<String, Session>, body: &str) -> bool {
         return sessions.remove(session_id).is_some();
     }
 
-    let Some(state) = state_for(event) else {
+    let Some(state) = state_for(event, &value) else {
         return false;
     };
 
-    // Not every event carries cwd; keep the one we already have.
-    let cwd = match value.get("cwd").and_then(|v| v.as_str()) {
-        Some(cwd) if !cwd.is_empty() => cwd.to_string(),
-        _ => sessions
-            .get(session_id)
-            .map(|s| s.cwd.clone())
-            .unwrap_or_default(),
+    // Not every event carries cwd, and the ones that do report the process's
+    // *current* directory. A session that cd's into a subfolder would
+    // otherwise appear as a second worktree, so a deeper path never replaces
+    // one already known - only a shallower one does.
+    let known = sessions.get(session_id).map(|s| s.cwd.clone());
+    let cwd = match (value.get("cwd").and_then(|v| v.as_str()), known) {
+        (Some(fresh), Some(old)) if !fresh.is_empty() => {
+            if is_inside(fresh, &old) {
+                old
+            } else {
+                fresh.to_string()
+            }
+        }
+        (Some(fresh), None) if !fresh.is_empty() => fresh.to_string(),
+        (_, Some(old)) => old,
+        (_, None) => String::new(),
     };
 
     sessions.insert(
@@ -834,10 +1249,7 @@ fn apply_hook(sessions: &mut HashMap<String, Session>, body: &str) -> bool {
             session_id: session_id.to_string(),
             cwd,
             state,
-            detail: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            detail: detail_for(event, &value),
             updated_at: now_ms(),
         },
     );
@@ -877,7 +1289,11 @@ fn start_hook_listener(app: AppHandle) {
                 }
                 changed
             };
-            let _ = changed;
+
+            // Log the ignored ones too - an event the widget silently drops
+            // is exactly the thing that makes hooks look broken.
+            record_hook(&app, &body, if changed { "applied" } else { "ignored" });
+            let _ = app.emit("hooks-changed", ());
 
             // Claude Code waits on this response, so answer immediately with a
             // no-op decision.
@@ -891,6 +1307,13 @@ fn start_hook_listener(app: AppHandle) {
 #[tauri::command]
 fn list_sessions(store: tauri::State<SessionStore>) -> Vec<Session> {
     snapshot(&store.0.lock().unwrap())
+}
+
+/// How long a session may be silent before the widget dims it. The frontend
+/// decides that per render off its own clock, so it needs the same number.
+#[tauri::command]
+fn quiet_after_ms() -> u64 {
+    QUIET_AFTER_MS
 }
 
 /// The URL to point Claude Code hooks at, shown in the setup hint.
@@ -1064,6 +1487,7 @@ fn main() {
         .manage(SessionStore::default())
         .manage(WorkspaceStore::default())
         .manage(PlacementStore::default())
+        .manage(HookLog::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -1078,6 +1502,8 @@ fn main() {
             }
             start_hover_watch(app.handle().clone());
             start_ide_watch(app.handle().clone());
+            start_session_reaper(app.handle().clone());
+            start_transcript_watch(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1088,6 +1514,8 @@ fn main() {
             list_workspaces,
             list_parked,
             hook_endpoint,
+            quiet_after_ms,
+            recent_hooks,
             close_widget,
             connect_claude_code,
             window_metrics,
@@ -1101,6 +1529,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parses_branches_detached_heads_and_paths_with_spaces() {
@@ -1174,5 +1603,322 @@ mod tests {
         assert_eq!(basename("C:/a/b/c/"), "c");
         // A drive root has no folder name to fall back on.
         assert_eq!(basename("C:\\"), "C:");
+    }
+
+    #[test]
+    fn a_finished_turn_is_waiting_for_you_not_done() {
+        // The whole point: Stop means the assistant stopped talking, so it is
+        // now your move. Reporting that as "done" hid the sessions that most
+        // wanted attention.
+        assert_eq!(state_for("Stop", &json!({})), Some("waiting"));
+        assert_eq!(state_for("StopFailure", &json!({})), Some("failed"));
+    }
+
+    #[test]
+    fn tool_events_keep_a_long_turn_looking_alive() {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStop"] {
+            assert_eq!(state_for(event, &json!({})), Some("working"), "{event}");
+        }
+    }
+
+    #[test]
+    fn attention_events_win_and_unknown_events_are_ignored() {
+        assert_eq!(state_for("Notification", &json!({})), Some("needs_you"));
+        assert_eq!(state_for("PermissionRequest", &json!({})), Some("needs_you"));
+        assert_eq!(state_for("SessionStart", &json!({})), Some("idle"));
+        assert_eq!(state_for("Compact", &json!({})), None);
+        assert_eq!(state_for("", &json!({})), None);
+    }
+
+    #[test]
+    fn every_event_the_states_need_is_actually_registered() {
+        // A state the widget can show but never subscribes to would simply
+        // never appear, silently.
+        for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "SubagentStop",
+                      "Stop", "StopFailure", "Notification", "SessionEnd"] {
+            assert!(HOOK_EVENTS.contains(&event), "{event} is not registered");
+        }
+    }
+
+    #[test]
+    fn silent_sessions_are_forgotten_but_recent_ones_are_kept() {
+        let now = 100 * 60 * 60 * 1000;
+        let mut sessions = HashMap::new();
+        for (id, age) in [("fresh", 0), ("quiet", QUIET_AFTER_MS), ("ancient", FORGET_AFTER_MS + 1)] {
+            sessions.insert(
+                id.to_string(),
+                Session {
+                    session_id: id.to_string(),
+                    cwd: "C:/x".to_string(),
+                    state: "waiting",
+                    detail: None,
+                    updated_at: now - age,
+                },
+            );
+        }
+
+        assert!(prune_dead(&mut sessions, now));
+        assert!(sessions.contains_key("fresh"));
+        // Quiet is dimmed, not dropped - it may still be a live session.
+        assert!(sessions.contains_key("quiet"));
+        assert!(!sessions.contains_key("ancient"));
+        // Nothing left to do the second time.
+        assert!(!prune_dead(&mut sessions, now));
+    }
+
+    #[test]
+    fn a_notification_message_reaches_the_session() {
+        let mut sessions = HashMap::new();
+        let body = r#"{"hook_event_name":"Notification","session_id":"s1",
+                       "cwd":"C:/Switchboard","message":"needs your permission"}"#;
+        assert!(apply_hook(&mut sessions, body));
+        let s = &sessions["s1"];
+        assert_eq!(s.state, "needs_you");
+        assert_eq!(s.detail.as_deref(), Some("needs your permission"));
+    }
+
+    #[test]
+    fn session_end_removes_and_is_idempotent() {
+        let mut sessions = HashMap::new();
+        apply_hook(&mut sessions, r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:/x"}"#);
+        assert!(apply_hook(&mut sessions, r#"{"hook_event_name":"SessionEnd","session_id":"s1"}"#));
+        assert!(!apply_hook(&mut sessions, r#"{"hook_event_name":"SessionEnd","session_id":"s1"}"#));
+    }
+
+    #[test]
+    fn a_later_event_without_cwd_keeps_the_one_we_know() {
+        let mut sessions = HashMap::new();
+        apply_hook(&mut sessions, r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:/Themis B"}"#);
+        apply_hook(&mut sessions, r#"{"hook_event_name":"Stop","session_id":"s1"}"#);
+        assert_eq!(sessions["s1"].cwd, "C:/Themis B");
+        assert_eq!(sessions["s1"].state, "waiting");
+    }
+
+    #[test]
+    fn detail_comes_from_the_field_each_event_actually_carries() {
+        // Field names captured from live Claude Code 2.1.267 deliveries.
+        assert_eq!(
+            detail_for("Stop", &json!({"last_assistant_message": "Just says \"hello\""})),
+            Some("Just says \"hello\"".to_string())
+        );
+        assert_eq!(
+            detail_for("UserPromptSubmit", &json!({"prompt": "Read note.txt"})),
+            Some("Read note.txt".to_string())
+        );
+        assert_eq!(
+            detail_for("PostToolUse", &json!({"tool_name": "Bash"})),
+            Some("Bash".to_string())
+        );
+        // There is no `message` field on these events; inventing one gave
+        // every row a blank detail.
+        assert_eq!(detail_for("Stop", &json!({"message": "nope"})), None);
+        assert_eq!(detail_for("SessionEnd", &json!({"reason": "logout"})), None);
+    }
+
+    #[test]
+    fn an_assistant_paragraph_is_flattened_to_one_clipped_line() {
+        let long = "line one\nline two ".repeat(40);
+        let out = one_line(&long, DETAIL_CHARS);
+        assert!(!out.contains('\n'));
+        assert!(out.chars().count() <= DETAIL_CHARS + 3, "{}", out.chars().count());
+        assert!(out.ends_with("..."));
+        // Short text is left exactly alone.
+        assert_eq!(one_line("all good", DETAIL_CHARS), "all good");
+    }
+
+    #[test]
+    fn an_idle_notification_is_not_treated_as_blocking() {
+        // Claude Code nudges about a minute after finishing. Painting that
+        // red trains you to ignore the badge.
+        let idle = json!({"notification_type": "idle_prompt"});
+        assert_eq!(state_for("Notification", &idle), Some("waiting"));
+
+        let permission = json!({"notification_type": "permission_prompt"});
+        assert_eq!(state_for("Notification", &permission), Some("needs_you"));
+
+        // Unknown kinds stay blocking: a missed prompt is worse than a spare.
+        let unknown = json!({"notification_type": "something_new"});
+        assert_eq!(state_for("Notification", &unknown), Some("needs_you"));
+        assert_eq!(state_for("Notification", &json!({})), Some("needs_you"));
+    }
+
+    #[test]
+    fn a_real_stop_payload_lands_as_waiting_with_its_last_message() {
+        // Shape taken verbatim from a live delivery.
+        let body = r#"{
+            "hook_event_name": "Stop",
+            "session_id": "e091acf2-0000-0000-0000-000000000000",
+            "cwd": "C:/Switchboard",
+            "transcript_path": "C:/Users/x/.claude/projects/p/s.jsonl",
+            "permission_mode": "default",
+            "stop_hook_active": false,
+            "last_assistant_message": "Just says \"hello\"",
+            "effort": "high"
+        }"#;
+        let mut sessions = HashMap::new();
+        assert!(apply_hook(&mut sessions, body));
+        let s = &sessions["e091acf2-0000-0000-0000-000000000000"];
+        assert_eq!(s.state, "waiting");
+        assert_eq!(s.detail.as_deref(), Some("Just says \"hello\""));
+        assert_eq!(s.cwd, "C:/Switchboard");
+    }
+
+    fn at(now: u64, state: &'static str, age: u64) -> Session {
+        Session {
+            session_id: "s".to_string(),
+            cwd: "c:/Themis B".to_string(),
+            state,
+            detail: None,
+            updated_at: now - age,
+        }
+    }
+
+    #[test]
+    fn a_session_switchboard_never_saw_start_is_discovered_from_disk() {
+        // The reported failure: an agent running in another worktree stayed
+        // invisible, because hooks only describe sessions that fire while
+        // Switchboard happens to be up, and a restart empties the store.
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        let found = vec![Transcript {
+            session_id: "themis-b".to_string(),
+            cwd: "c:/Themis B".to_string(),
+            last_write: now - 5_000,
+        }];
+
+        assert!(merge_transcripts(&mut sessions, &found, now));
+        let s = &sessions["themis-b"];
+        // Being written to right now means the turn is still moving.
+        assert_eq!(s.state, "working");
+        assert_eq!(s.cwd, "c:/Themis B");
+    }
+
+    #[test]
+    fn a_transcript_gone_cold_is_shown_but_not_claimed_to_be_working() {
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        let found = vec![Transcript {
+            session_id: "old".to_string(),
+            cwd: "c:/Themis".to_string(),
+            last_write: now - 30 * 60 * 1000,
+        }];
+        merge_transcripts(&mut sessions, &found, now);
+        // Disk knows it exists and when it last moved, not what it is doing.
+        assert_eq!(sessions["old"].state, "unknown");
+    }
+
+    #[test]
+    fn disk_activity_keeps_a_long_turn_from_looking_silent() {
+        // Between UserPromptSubmit and Stop no hook fires, so a turn that
+        // runs for an hour used to age into "quiet" while working fine.
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        sessions.insert("s".to_string(), at(now, "working", 45 * 60 * 1000));
+        let found = vec![Transcript {
+            session_id: "s".to_string(),
+            cwd: "c:/Themis B".to_string(),
+            last_write: now - 2_000,
+        }];
+
+        assert!(merge_transcripts(&mut sessions, &found, now));
+        assert_eq!(sessions["s"].state, "working");
+        assert_eq!(sessions["s"].updated_at, now - 2_000);
+    }
+
+    #[test]
+    fn a_stops_own_tail_does_not_flip_it_back_to_working() {
+        // Stop writes its last lines a moment after the hook arrives. That
+        // must not read as a new turn.
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        sessions.insert("s".to_string(), at(now, "waiting", 1_000));
+        let found = vec![Transcript {
+            session_id: "s".to_string(),
+            cwd: "c:/Themis B".to_string(),
+            last_write: now - 500,
+        }];
+
+        merge_transcripts(&mut sessions, &found, now);
+        assert_eq!(sessions["s"].state, "waiting", "a stop tail is not new work");
+    }
+
+    #[test]
+    fn writing_long_after_the_last_hook_is_a_turn_we_missed() {
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        sessions.insert("s".to_string(), at(now, "waiting", 10 * 60 * 1000));
+        let found = vec![Transcript {
+            session_id: "s".to_string(),
+            cwd: "c:/Themis B".to_string(),
+            last_write: now - 3_000,
+        }];
+
+        merge_transcripts(&mut sessions, &found, now);
+        assert_eq!(sessions["s"].state, "working");
+    }
+
+    #[test]
+    fn a_blocked_session_is_never_talked_over_by_disk_activity() {
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        sessions.insert("s".to_string(), at(now, "needs_you", 10 * 60 * 1000));
+        let found = vec![Transcript {
+            session_id: "s".to_string(),
+            cwd: "c:/Themis B".to_string(),
+            last_write: now - 1_000,
+        }];
+
+        merge_transcripts(&mut sessions, &found, now);
+        assert_eq!(sessions["s"].state, "needs_you");
+    }
+
+    #[test]
+    fn cd_into_a_subfolder_does_not_split_a_worktree_in_two() {
+        // Hook payloads carry the process's current directory, so a session
+        // that cd'd into src-rust reported a second worktree.
+        assert!(is_inside(r"C:\Switchboard\src-rust", r"C:\Switchboard"));
+        assert!(is_inside("c:/switchboard/src-rust", r"C:\Switchboard"));
+        assert!(is_inside(r"C:\Switchboard", r"C:\Switchboard\"));
+        assert!(!is_inside(r"C:\Themis", r"C:\Themis B"));
+        assert!(!is_inside(r"C:\Switchboard", r"C:\Switchboard\src-rust"));
+
+        let mut sessions = HashMap::new();
+        apply_hook(&mut sessions, r#"{"hook_event_name":"SessionStart","session_id":"s","cwd":"C:/Switchboard"}"#);
+        apply_hook(&mut sessions, r#"{"hook_event_name":"PostToolUse","session_id":"s","cwd":"C:/Switchboard/src-rust","tool_name":"Bash"}"#);
+        assert_eq!(sessions["s"].cwd, "C:/Switchboard");
+
+        // Moving genuinely elsewhere still updates.
+        apply_hook(&mut sessions, r#"{"hook_event_name":"PostToolUse","session_id":"s","cwd":"C:/Themis","tool_name":"Bash"}"#);
+        assert_eq!(sessions["s"].cwd, "C:/Themis");
+    }
+
+    #[test]
+    fn only_current_sessions_survive_a_directory_full_of_history() {
+        // Comfortably larger than the oldest age below, so the test's own
+        // arithmetic cannot underflow.
+        let now = 100_000_000;
+        let t = |id: &str, cwd: &str, age: u64| Transcript {
+            session_id: id.to_string(),
+            cwd: cwd.to_string(),
+            last_write: now - age,
+        };
+        let found = vec![
+            t("live", "c:/Themis B", 3_000),               // still writing
+            t("also-live", "c:/Themis B", 10_000),         // concurrent, also writing
+            t("newest-cold", "c:/Themis", 40 * 60 * 1000), // newest for its worktree
+            t("older", "c:/Themis", 90 * 60 * 1000),       // superseded
+            t("ancient", "c:/Themis B", 3 * 60 * 60 * 1000),
+        ];
+
+        let kept: Vec<String> = keep_current(found, now)
+            .into_iter()
+            .map(|t| t.session_id)
+            .collect();
+
+        assert!(kept.contains(&"live".to_string()));
+        assert!(kept.contains(&"also-live".to_string()), "concurrent sessions are real");
+        assert!(kept.contains(&"newest-cold".to_string()));
+        assert!(!kept.contains(&"older".to_string()), "superseded history is noise");
+        assert!(!kept.contains(&"ancient".to_string()));
     }
 }

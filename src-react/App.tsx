@@ -1,9 +1,16 @@
 import { useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
-type SessionState = "needs_you" | "working" | "done" | "idle" | "unknown";
+type SessionState =
+  | "needs_you"
+  | "failed"
+  | "waiting"
+  | "working"
+  | "idle"
+  | "unknown";
 
 type Session = {
   sessionId: string;
@@ -24,18 +31,23 @@ type Workspace = {
 
 const LABEL: Record<SessionState, string> = {
   needs_you: "needs you",
+  failed: "failed",
+  waiting: "your turn",
   working: "working",
-  done: "done",
   idle: "idle",
   unknown: "unknown",
 };
 
+/// Sorted by how much of your attention it wants. Blocked first, then things
+/// that finished and are waiting on you; anything still working is last,
+/// because there is nothing for you to do about it.
 const RANK: Record<SessionState, number> = {
   needs_you: 0,
-  working: 1,
-  done: 2,
-  idle: 3,
-  unknown: 4,
+  failed: 1,
+  waiting: 2,
+  working: 3,
+  idle: 4,
+  unknown: 5,
 };
 
 /// A patch bay: one hub with cords curving out to jacks. Drawn with
@@ -100,6 +112,7 @@ type Group = {
   state: SessionState;
   updatedAt: number;
   ide: string | null;
+  quiet: boolean;
 };
 
 /// The same folder arrives spelled differently depending on the source -
@@ -107,6 +120,13 @@ type Group = {
 /// group on a normalised key and keep the first spelling seen for display.
 function pathKey(path: string): string {
   return path.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+}
+
+/// A session nothing has been heard from in a while. Still shown, because it
+/// may simply be a session you left open, but dimmed and kept out of the
+/// badge count so it cannot make the widget cry wolf.
+function isQuiet(session: Session, now: number, quietAfterMs: number): boolean {
+  return quietAfterMs > 0 && now - session.updatedAt > quietAfterMs;
 }
 
 /// Has Switchboard filled a monitor with this worktree's editor? If so a
@@ -123,7 +143,16 @@ function isParked(cwd: string, parked: string[]): boolean {
 /// from the moment Switchboard starts. Editors already running are discovered
 /// separately, so they appear with no sessions and an `unknown` state until a
 /// hook says otherwise - silence is not completion.
-function groupByWorktree(sessions: Session[], workspaces: Workspace[]): Group[] {
+function groupByWorktree(
+  sessions: Session[],
+  workspaces: Workspace[],
+  now: number,
+  quietAfterMs: number,
+): Group[] {
+  // A quiet session must never outrank a live one, however urgent it looked
+  // when it went silent.
+  const weight = (s: Session) =>
+    RANK[s.state] + (isQuiet(s, now, quietAfterMs) ? 100 : 0);
   const byKey = new Map<string, Group>();
 
   for (const session of sessions) {
@@ -137,6 +166,7 @@ function groupByWorktree(sessions: Session[], workspaces: Workspace[]): Group[] 
         state: "unknown",
         updatedAt: 0,
         ide: null,
+        quiet: false,
       });
   }
 
@@ -151,15 +181,18 @@ function groupByWorktree(sessions: Session[], workspaces: Workspace[]): Group[] 
         state: "unknown",
         updatedAt: 0,
         ide: workspace.ideName,
+        quiet: false,
       });
   }
 
   const groups = [...byKey.values()];
   for (const group of groups) {
     group.sessions.sort(
-      (a, b) => RANK[a.state] - RANK[b.state] || b.updatedAt - a.updatedAt,
+      (a, b) => weight(a) - weight(b) || b.updatedAt - a.updatedAt,
     );
-    group.state = group.sessions[0]?.state ?? "unknown";
+    const lead = group.sessions[0];
+    group.state = lead?.state ?? "unknown";
+    group.quiet = !lead || isQuiet(lead, now, quietAfterMs);
     group.updatedAt = group.sessions.reduce(
       (latest, s) => Math.max(latest, s.updatedAt),
       0,
@@ -167,7 +200,10 @@ function groupByWorktree(sessions: Session[], workspaces: Workspace[]): Group[] 
   }
 
   return groups.sort(
-    (a, b) => RANK[a.state] - RANK[b.state] || b.updatedAt - a.updatedAt,
+    (a, b) =>
+      Number(a.quiet) - Number(b.quiet) ||
+      RANK[a.state] - RANK[b.state] ||
+      b.updatedAt - a.updatedAt,
   );
 }
 
@@ -184,6 +220,8 @@ export default function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   // Worktrees currently filling a monitor. Keyed the same way Rust keys them.
   const [parked, setParked] = useState<string[]>([]);
+  // Rust owns the threshold; the frontend re-derives quietness every tick.
+  const [quietAfterMs, setQuietAfterMs] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -192,6 +230,7 @@ export default function App() {
     void invoke<Session[]>("list_sessions").then(setSessions).catch(() => {});
     void invoke<Workspace[]>("list_workspaces").then(setWorkspaces).catch(() => {});
     void invoke<string[]>("list_parked").then(setParked).catch(() => {});
+    void invoke<number>("quiet_after_ms").then(setQuietAfterMs).catch(() => {});
 
     // Rust owns hover: the window never resizes, so it watches the pointer and
     // tells us when to grow. Nothing here changes window geometry.
@@ -228,110 +267,134 @@ export default function App() {
     }
   }
 
-  const groups = groupByWorktree(sessions, workspaces);
-  const waiting = sessions.filter((s) => s.state === "needs_you").length;
-  const working = sessions.filter((s) => s.state === "working").length;
+  const groups = groupByWorktree(sessions, workspaces, now, quietAfterMs);
+
+  // The badge answers one question - what is the most urgent thing, and how
+  // many of them - so it reports the worst live state rather than a total.
+  // Quiet sessions are excluded: a count you cannot act on is noise.
+  const live = sessions.filter((s) => !isQuiet(s, now, quietAfterMs));
+  const tally = (state: SessionState) =>
+    live.filter((s) => s.state === state).length;
 
   const pulse: SessionState =
-    waiting > 0 ? "needs_you" : working > 0 ? "working" : sessions.length ? "done" : "idle";
-  const count = waiting > 0 ? waiting : sessions.length;
+    tally("needs_you") > 0
+      ? "needs_you"
+      : tally("failed") > 0
+        ? "failed"
+        : tally("waiting") > 0
+          ? "waiting"
+          : tally("working") > 0
+            ? "working"
+            : live.length > 0
+              ? "idle"
+              : "unknown";
+  const count = pulse === "unknown" ? 0 : tally(pulse);
 
   return (
-    <div className="stage">
-      <div
-        className={`box ${expanded ? "expanded" : "collapsed"} ${pulse}`}
-        data-tauri-drag-region
-      >
-        {!expanded && (
-          <>
-            <Mark />
-            {count > 0 && <span className="count">{count}</span>}
-          </>
-        )}
+    <div
+      className={`stage ${pulse}${expanded ? " is-expanded" : ""}`}
+      data-tauri-drag-region
+    >
+      <div className="badge" data-tauri-drag-region aria-hidden={expanded}>
+        <Mark />
+        {count > 0 && <span className="count">{count}</span>}
+      </div>
 
-        {expanded && (
-          <>
-            <div className="panel" data-tauri-drag-region>
-              {error && (
-                <p className="error" role="alert">
-                  {error}
-                </p>
-              )}
+      <div className="surface" aria-hidden={!expanded} data-tauri-drag-region>
+        <div className="panel" data-tauri-drag-region>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
 
-              {groups.length === 0 ? (
-                <p className="empty">
-                  No sessions or editors found. Connect Claude Code in settings,
-                  then start a session.
-                </p>
-              ) : (
-                <ul className="worktrees">
-                  {groups.map((group) => (
-                    <li key={group.cwd} className="worktree">
-                      <button
-                        className={`worktree-head ${group.state}`}
-                        onClick={() => open(group.cwd)}
-                        title={
-                          isParked(group.cwd, parked)
-                            ? `${group.cwd}\nFilling this monitor. Click again to send it back.`
-                            : `${group.cwd}\nClick to fill this monitor.`
-                        }
+          {groups.length === 0 ? (
+            <p className="empty">
+              No sessions or editors found. Connect Claude Code in settings,
+              then start a session.
+            </p>
+          ) : (
+            <ul className="worktrees">
+              {groups.map((group, index) => (
+                <li
+                  key={group.cwd}
+                  className="worktree"
+                  /* Capped so a long list does not trail on forever. */
+                  style={{ "--i": Math.min(index, 5) } as CSSProperties}
+                >
+                  <button
+                    className={`worktree-head ${group.state}${group.quiet ? " quiet" : ""}`}
+                    onClick={() => open(group.cwd)}
+                    title={
+                      isParked(group.cwd, parked)
+                        ? `${group.cwd}\nFilling this monitor. Click again to send it back.`
+                        : `${group.cwd}\nClick to fill this monitor.`
+                    }
+                  >
+                    <span className="dot" aria-hidden="true" />
+                    <span className="worktree-name">
+                      {basename(group.cwd) || "unknown"}
+                    </span>
+                    {isParked(group.cwd, parked) && (
+                      <span className="parked" aria-label="filling this monitor">
+                        &#8617;
+                      </span>
+                    )}
+                    <span className="worktree-count">
+                      {group.sessions.length > 0
+                        ? group.sessions.length
+                        : group.ide
+                          ? "idle editor"
+                          : "0"}
+                    </span>
+                  </button>
+
+                  <ul className="sessions">
+                    {group.sessions.map((session) => (
+                      <li
+                        key={session.sessionId}
+                        className={`session ${session.state}${
+                          isQuiet(session, now, quietAfterMs) ? " quiet" : ""
+                        }`}
+                        title={session.detail ?? undefined}
                       >
                         <span className="dot" aria-hidden="true" />
-                        <span className="worktree-name">
-                          {basename(group.cwd) || "unknown"}
-                        </span>
-                        {isParked(group.cwd, parked) && (
-                          <span className="parked" aria-label="filling this monitor">
-                            &#8617;
+                        <span className="state">{LABEL[session.state]}</span>
+                        {session.detail ? (
+                          <span className="detail">{session.detail}</span>
+                        ) : (
+                          <span className="sid">
+                            {shortId(session.sessionId)}
                           </span>
                         )}
-                        <span className="worktree-count">
-                          {group.sessions.length > 0
-                            ? group.sessions.length
-                            : group.ide
-                              ? "idle editor"
-                              : "0"}
+                        <span className="time">
+                          {ago(session.updatedAt, now)}
                         </span>
-                      </button>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
 
-                      <ul className="sessions">
-                        {group.sessions.map((session) => (
-                          <li
-                            key={session.sessionId}
-                            className={`session ${session.state}`}
-                          >
-                            <span className="dot" aria-hidden="true" />
-                            <span className="state">{LABEL[session.state]}</span>
-                            <span className="sid">{shortId(session.sessionId)}</span>
-                            <span className="time">
-                              {ago(session.updatedAt, now)}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-
-            <button
-              className="close"
-              title="Close Eve"
-              onClick={() => void invoke("close_widget").catch(() => {})}
-            >
-              ×
-            </button>
-            <button
-              className="gear"
-              title="Settings"
-              onClick={() => void invoke("open_settings").catch(() => {})}
-            >
-              <Cog />
-            </button>
-          </>
-        )}
-
+        <button
+          className="close"
+          title="Close Eve"
+          tabIndex={expanded ? 0 : -1}
+          onClick={() => void invoke("close_widget").catch(() => {})}
+        >
+          ×
+        </button>
+        <button
+          className="gear"
+          title="Settings"
+          tabIndex={expanded ? 0 : -1}
+          onClick={() => void invoke("open_settings").catch(() => {})}
+        >
+          <Cog />
+        </button>
       </div>
     </div>
   );
