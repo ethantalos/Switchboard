@@ -1316,6 +1316,81 @@ fn quiet_after_ms() -> u64 {
     QUIET_AFTER_MS
 }
 
+/// Whether Claude Code is actually wired up to talk to Switchboard.
+///
+/// Hooks failing quietly is the worst case for this widget: it looks like it
+/// is working and simply reports nothing. Adding an event to HOOK_EVENTS in a
+/// new version has the same effect, because the user's settings.json still
+/// holds the old list.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookHealth {
+    endpoint: String,
+    /// Events Switchboard needs that settings.json is missing.
+    missing: Vec<String>,
+    registered: usize,
+    /// Events pointed somewhere other than this Switchboard.
+    misdirected: Vec<String>,
+    /// When a hook last arrived, or None if never.
+    last_delivery: Option<u64>,
+    deliveries: usize,
+}
+
+#[tauri::command]
+fn hook_health(app: AppHandle, log: tauri::State<HookLog>) -> Result<HookHealth, String> {
+    let endpoint = format!("http://127.0.0.1:{HOOK_PORT}");
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut misdirected: Vec<String> = Vec::new();
+    let mut registered = 0usize;
+
+    let file = app
+        .path()
+        .home_dir()
+        .map_err(|e| format!("Could not find your home directory: {e}"))?
+        .join(".claude")
+        .join("settings.json");
+
+    let settings: serde_json::Value = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let hooks = settings.get("hooks").and_then(|h| h.as_object());
+
+    for event in HOOK_EVENTS {
+        let groups = hooks.and_then(|h| h.get(event)).and_then(|g| g.as_array());
+        let Some(groups) = groups else {
+            missing.push(event.to_string());
+            continue;
+        };
+        registered += 1;
+
+        let points_here = groups.iter().any(|group| {
+            group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry.get("url").and_then(|u| u.as_str()) == Some(endpoint.as_str())
+                    })
+                })
+        });
+        if !points_here {
+            misdirected.push(event.to_string());
+        }
+    }
+
+    let entries = log.0.lock().unwrap();
+    Ok(HookHealth {
+        endpoint,
+        missing,
+        registered,
+        misdirected,
+        last_delivery: entries.back().map(|r| r.at),
+        deliveries: entries.len(),
+    })
+}
+
 /// The URL to point Claude Code hooks at, shown in the setup hint.
 #[tauri::command]
 fn hook_endpoint() -> String {
@@ -1516,6 +1591,7 @@ fn main() {
             hook_endpoint,
             quiet_after_ms,
             recent_hooks,
+            hook_health,
             close_widget,
             connect_claude_code,
             window_metrics,

@@ -82,3 +82,82 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* Whether Claude Code is actually wired up, stated plainly. */
+.status {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.625rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.status.good {
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+.status.warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.status.bad {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* The raw feed, so silence can be told apart from a widget that ignores things. */
+.hooks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 11rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.hooks li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.1875rem 0.5rem;
+  font-size: 0.6875rem;
+  font-family: var(--mono);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.hooks li:last-child {
+  border-bottom: none;
+}
+
+.hooks li.ignored {
+  opacity: 0.5;
+}
+
+.hook-event {
+  flex: none;
+  min-width: 9.5rem;
+  color: var(--text);
+}
+
+.hook-where {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.hook-outcome,
+.hook-when {
+  flex: none;
+  color: var(--muted);
+}
+
+.hook-outcome {
+  min-width: 3.75rem;
+}
