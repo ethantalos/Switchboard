@@ -23,6 +23,7 @@ type Session = {
 
 /// Whether Claude Code is actually configured to report to this widget.
 type HookHealth = {
+  listening: boolean;
   missing: string[];
   misdirected: string[];
   registered: number;
@@ -402,18 +403,33 @@ export default function App() {
             </p>
           )}
 
-          {health && health.missing.length + health.misdirected.length > 0 && (
+          {health && !health.listening && (
             <button
-              className="nudge"
+              className="nudge bad"
               tabIndex={expanded ? 0 : -1}
               onClick={() => void invoke("open_settings").catch(() => {})}
-              title={`Not reporting: ${[...health.missing, ...health.misdirected].join(", ")}`}
             >
-              {health.missing.length + health.misdirected.length} hook
-              {health.missing.length + health.misdirected.length === 1 ? "" : "s"}{" "}
-              missing - sessions may look idle. Fix
+              Not listening - another Switchboard has the port. Nothing can
+              reach this one.
             </button>
           )}
+
+          {health &&
+            health.listening &&
+            health.missing.length + health.misdirected.length > 0 && (
+              <button
+                className="nudge"
+                tabIndex={expanded ? 0 : -1}
+                onClick={() => void invoke("open_settings").catch(() => {})}
+                title={`Not reporting: ${[...health.missing, ...health.misdirected].join(", ")}`}
+              >
+                {health.missing.length + health.misdirected.length} hook
+                {health.missing.length + health.misdirected.length === 1
+                  ? ""
+                  : "s"}{" "}
+                missing - sessions may look idle. Fix
+              </button>
+            )}
 
           {groups.length === 0 ? (
             <p className="empty">

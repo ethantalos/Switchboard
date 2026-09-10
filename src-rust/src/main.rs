@@ -1349,13 +1349,38 @@ fn snapshot(sessions: &HashMap<String, Session>) -> Vec<Session> {
 /// sees sessions Switchboard never started.
 fn start_hook_listener(app: AppHandle) {
     std::thread::spawn(move || {
-        let server = match tiny_http::Server::http(("127.0.0.1", HOOK_PORT)) {
-            Ok(server) => server,
-            Err(e) => {
-                log::error!("Hook listener could not bind port {HOOK_PORT}: {e}");
-                return;
+        // Restarting leaves the old process holding the port for a moment,
+        // and a second Switchboard would hold it for good. Retry briefly,
+        // then give up loudly - a listener that quietly never bound makes
+        // every session invisible with no sign anything is wrong.
+        let mut server = None;
+        for attempt in 0..LISTEN_RETRIES {
+            match tiny_http::Server::http(("127.0.0.1", HOOK_PORT)) {
+                Ok(bound) => {
+                    server = Some(bound);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Hook port {HOOK_PORT} busy (attempt {}/{LISTEN_RETRIES}): {e}",
+                        attempt + 1
+                    );
+                    std::thread::sleep(Duration::from_millis(LISTEN_RETRY_MS));
+                }
             }
+        }
+
+        let Some(server) = server else {
+            log::error!(
+                "Hook listener could not bind {HOOK_PORT}. Another Switchboard is probably running; this one will never see a session."
+            );
+            app.state::<ListenerUp>().0.store(false, Ordering::Relaxed);
+            let _ = app.emit("hooks-changed", ());
+            return;
         };
+
+        app.state::<ListenerUp>().0.store(true, Ordering::Relaxed);
+        let _ = app.emit("hooks-changed", ());
         log::info!("Hook listener ready on 127.0.0.1:{HOOK_PORT}");
 
         for mut request in server.incoming_requests() {
@@ -1461,6 +1486,21 @@ fn set_order(app: AppHandle, order: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/// How many times to retry binding the hook port, and how long between.
+const LISTEN_RETRIES: u32 = 10;
+const LISTEN_RETRY_MS: u64 = 500;
+
+/// Whether the hook listener actually got the port.
+pub struct ListenerUp(AtomicBool);
+
+impl Default for ListenerUp {
+    fn default() -> Self {
+        // Assume it will bind; the listener corrects this either way within
+        // a few seconds of startup.
+        Self(AtomicBool::new(true))
+    }
+}
+
 /// Whether Claude Code is actually wired up to talk to Switchboard.
 ///
 /// Hooks failing quietly is the worst case for this widget: it looks like it
@@ -1471,6 +1511,9 @@ fn set_order(app: AppHandle, order: Vec<String>) -> Result<(), String> {
 #[serde(rename_all = "camelCase")]
 pub struct HookHealth {
     endpoint: String,
+    /// False when the port could not be taken, which makes every other
+    /// field meaningless - nothing can arrive at all.
+    listening: bool,
     /// Events Switchboard needs that settings.json is missing.
     missing: Vec<String>,
     registered: usize,
@@ -1528,6 +1571,7 @@ fn hook_health(app: AppHandle, log: tauri::State<HookLog>) -> Result<HookHealth,
     let entries = log.0.lock().unwrap();
     Ok(HookHealth {
         endpoint,
+        listening: app.state::<ListenerUp>().0.load(Ordering::Relaxed),
         missing,
         registered,
         misdirected,
@@ -1711,6 +1755,7 @@ fn main() {
         .manage(OrderStore::default())
         .manage(Pinned::default())
         .manage(Ended::default())
+        .manage(ListenerUp::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

@@ -280,6 +280,12 @@ targets Windows and macOS only, so the split was removed along with the
 both back.
 
 ## Saying when it cannot see
+The hook listener retries the port ten times over five seconds before giving
+up: restarting leaves the previous process holding it for a moment. If it
+never binds - a second Switchboard is running - it says so in both windows,
+because a listener that quietly never bound makes every session invisible
+with no sign anything is wrong.
+
 Unregistered hooks make every session look idle, which is indistinguishable
 from having nothing to do - the failure and the all-clear look the same. The
 panel carries a banner naming how many events are missing, and it opens the

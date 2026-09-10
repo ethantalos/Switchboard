@@ -5,6 +5,7 @@ import "./Settings.css";
 
 type HookHealth = {
   endpoint: string;
+  listening: boolean;
   missing: string[];
   registered: number;
   misdirected: string[];
@@ -93,8 +94,18 @@ export default function Settings() {
         </p>
 
         {health && (
-          <div className={`status ${incomplete ? "bad" : silent ? "warn" : "good"}`}>
-            {incomplete ? (
+          <div
+            className={`status ${
+              !health.listening ? "bad" : incomplete ? "bad" : silent ? "warn" : "good"
+            }`}
+          >
+            {!health.listening ? (
+              <>
+                <strong>Not listening.</strong> The port could not be taken,
+                so nothing can reach this window whatever the hooks say.
+                Another Switchboard is probably already running.
+              </>
+            ) : incomplete ? (
               <>
                 <strong>Hooks are out of date.</strong>{" "}
                 {health.missing.length > 0 && (

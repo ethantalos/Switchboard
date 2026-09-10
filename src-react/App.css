@@ -593,3 +593,9 @@
 .session.opened .time {
   align-self: flex-start;
 }
+
+/* The listener never bound, so nothing can arrive at all. */
+.nudge.bad {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
