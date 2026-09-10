@@ -42,7 +42,7 @@ export default function Settings() {
   const [hooks, setHooks] = useState<HookRecord[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(() => {
     void invoke<HookHealth>("hook_health").then(setHealth).catch(() => {});

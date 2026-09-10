@@ -1316,6 +1316,65 @@ fn quiet_after_ms() -> u64 {
     QUIET_AFTER_MS
 }
 
+/// The order the user dragged their worktrees into.
+///
+/// Everything else in the widget is derived from what Claude Code is doing,
+/// so it is the one piece of state worth keeping on disk: it is a preference,
+/// and losing it on every restart would make dragging pointless.
+#[derive(Default)]
+pub struct OrderStore(Mutex<Vec<String>>);
+
+/// Where the order lives, next to whatever else the app keeps per user.
+fn order_file(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Could not find a config directory: {e}"))?;
+    Ok(dir.join("worktree-order.json"))
+}
+
+/// Read the saved order, or an empty one. A missing or corrupt file is not
+/// worth failing over - the widget just falls back to sorting by urgency.
+fn load_order(app: &AppHandle) -> Vec<String> {
+    let Ok(path) = order_file(app) else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Worktree keys in the order the user arranged them, most-preferred first.
+#[tauri::command]
+fn list_order(store: tauri::State<OrderStore>) -> Vec<String> {
+    store.0.lock().unwrap().clone()
+}
+
+/// Save a new order. Keys are the frontend's normalised paths, so the two
+/// sides agree on identity regardless of drive-letter case or separator.
+#[tauri::command]
+fn set_order(app: AppHandle, order: Vec<String>) -> Result<(), String> {
+    let path = order_file(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+    }
+
+    let text = serde_json::to_string_pretty(&order).map_err(|e| e.to_string())?;
+    // Write beside the target and rename over it, so an interrupted write
+    // cannot leave half an order behind.
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, text + "\n")
+        .map_err(|e| format!("Could not save the order: {e}"))?;
+    std::fs::rename(&temp, &path)
+        .map_err(|e| format!("Could not replace the order: {e}"))?;
+
+    *app.state::<OrderStore>().0.lock().unwrap() = order.clone();
+    let _ = app.emit("order-changed", order);
+    Ok(())
+}
+
 /// Whether Claude Code is actually wired up to talk to Switchboard.
 ///
 /// Hooks failing quietly is the worst case for this widget: it looks like it
@@ -1563,6 +1622,7 @@ fn main() {
         .manage(WorkspaceStore::default())
         .manage(PlacementStore::default())
         .manage(HookLog::default())
+        .manage(OrderStore::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -1571,6 +1631,7 @@ fn main() {
                         .build(),
                 )?;
             }
+            *app.state::<OrderStore>().0.lock().unwrap() = load_order(&app.handle().clone());
             start_hook_listener(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_ignore_cursor_events(true);
@@ -1592,6 +1653,8 @@ fn main() {
             quiet_after_ms,
             recent_hooks,
             hook_health,
+            list_order,
+            set_order,
             close_widget,
             connect_claude_code,
             window_metrics,

@@ -193,6 +193,7 @@ The frontend has no OS access; it calls Rust through `invoke`.
 | `list_sessions()` | Current sessions, most urgent first |
 | `list_workspaces()` | Editors with Claude Code attached, from `~/.claude/ide` |
 | `list_parked()` | Worktrees currently filling a monitor, which a click can send back |
+| `list_order()` / `set_order(order)` | The order worktrees were dragged into |
 | `hook_endpoint()` | The URL hooks should POST to |
 | `quiet_after_ms()` | How long before a silent session is dimmed |
 | `recent_hooks()` | The last 200 hook deliveries, for diagnosing silence |
@@ -203,7 +204,7 @@ The frontend has no OS access; it calls Rust through `invoke`.
 | `window_metrics()` | Scale factor and physical size, for mixed-DPI diagnosis |
 
 Events sent the other way: `sessions-changed`, `workspaces-changed`,
-`parked-changed`, and `hover-changed`.
+`parked-changed`, `order-changed`, `hooks-changed`, and `hover-changed`.
 
 `open_settings` is async on purpose. A synchronous command runs on the main
 thread, and building a webview there deadlocks the event loop: the window
@@ -271,6 +272,16 @@ iOS and Android, which need a library rather than a `main()`. Switchboard
 targets Windows and macOS only, so the split was removed along with the
 `[lib]` target in Cargo.toml. Adding a mobile target later means putting
 both back.
+
+## Ordering
+Worktrees sort by urgency, which is right until you have a fixed mental
+picture of where each one lives. Dragging a row pins the arrangement, saved to
+`worktree-order.json` in the app config directory - the one piece of state
+worth persisting, because everything else is derived from what Claude Code is
+doing and a preference that resets every restart is not a preference.
+
+A worktree the user has not placed falls in after the placed ones, still
+sorted by urgency, so a new one still surfaces on its own.
 
 ## Commands to run it
 - `npm install` once, then `npm run tauri dev`.

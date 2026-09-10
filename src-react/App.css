@@ -476,3 +476,31 @@
     transform: none;
   }
 }
+
+/*
+ * Drag to reorder. The row is the drag handle, so the grip is a hint rather
+ * than a target - grabbing anywhere works, which matters at this size.
+ */
+.worktree.dragging {
+  opacity: 0.3;
+}
+
+.worktree.drop-target > .worktree-head {
+  box-shadow: inset 0 2px 0 var(--status);
+}
+
+.worktree-head::before {
+  content: "⠿";
+  flex: none;
+  width: 0;
+  margin-right: -0.125rem;
+  opacity: 0;
+  color: var(--muted);
+  font-size: 0.6875rem;
+  transition: opacity var(--duration-fast) var(--curve-easy-ease);
+}
+
+.worktree-head:hover::before {
+  width: 0.625rem;
+  opacity: 0.55;
+}

@@ -148,6 +148,7 @@ function groupByWorktree(
   workspaces: Workspace[],
   now: number,
   quietAfterMs: number,
+  order: string[],
 ): Group[] {
   // A quiet session must never outrank a live one, however urgent it looked
   // when it went silent.
@@ -199,8 +200,16 @@ function groupByWorktree(
     );
   }
 
+  // A worktree the user placed by hand stays where they put it. Everything
+  // else falls back to urgency, so a new one still surfaces on its own.
+  const placed = (g: Group) => {
+    const at = order.indexOf(pathKey(g.cwd));
+    return at === -1 ? Number.MAX_SAFE_INTEGER : at;
+  };
+
   return groups.sort(
     (a, b) =>
+      placed(a) - placed(b) ||
       Number(a.quiet) - Number(b.quiet) ||
       RANK[a.state] - RANK[b.state] ||
       b.updatedAt - a.updatedAt,
@@ -222,15 +231,20 @@ export default function App() {
   const [parked, setParked] = useState<string[]>([]);
   // Rust owns the threshold; the frontend re-derives quietness every tick.
   const [quietAfterMs, setQuietAfterMs] = useState(0);
+  // The order the user dragged worktrees into, as normalised path keys.
+  const [order, setOrder] = useState<string[]>([]);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     void invoke<Session[]>("list_sessions").then(setSessions).catch(() => {});
     void invoke<Workspace[]>("list_workspaces").then(setWorkspaces).catch(() => {});
     void invoke<string[]>("list_parked").then(setParked).catch(() => {});
     void invoke<number>("quiet_after_ms").then(setQuietAfterMs).catch(() => {});
+    void invoke<string[]>("list_order").then(setOrder).catch(() => {});
 
     // Rust owns hover: the window never resizes, so it watches the pointer and
     // tells us when to grow. Nothing here changes window geometry.
@@ -246,6 +260,9 @@ export default function App() {
     const offParked = listen<string[]>("parked-changed", (event) =>
       setParked(event.payload),
     );
+    const offOrder = listen<string[]>("order-changed", (event) =>
+      setOrder(event.payload),
+    );
 
     const ticker = setInterval(() => setNow(Date.now()), 10_000);
 
@@ -254,6 +271,7 @@ export default function App() {
       void offSessions.then((off) => off());
       void offWorkspaces.then((off) => off());
       void offParked.then((off) => off());
+      void offOrder.then((off) => off());
       clearInterval(ticker);
     };
   }, []);
@@ -267,7 +285,28 @@ export default function App() {
     }
   }
 
-  const groups = groupByWorktree(sessions, workspaces, now, quietAfterMs);
+  const groups = groupByWorktree(sessions, workspaces, now, quietAfterMs, order);
+
+  /// Move the dragged worktree in front of the one it was dropped on, and
+  /// persist the whole visible order so later sessions keep the arrangement.
+  function reorder(targetKey: string) {
+    setDropTarget(null);
+    const from = dragging;
+    setDragging(null);
+    if (!from || from === targetKey) return;
+
+    const keys = groups.map((g) => pathKey(g.cwd));
+    const at = keys.indexOf(from);
+    const to = keys.indexOf(targetKey);
+    if (at === -1 || to === -1) return;
+
+    const next = [...keys];
+    next.splice(to, 0, ...next.splice(at, 1));
+    setOrder(next);
+    void invoke("set_order", { order: next }).catch((err) =>
+      setError(String(err)),
+    );
+  }
 
   // The badge answers one question - what is the most urgent thing, and how
   // many of them - so it reports the worst live state rather than a total.
@@ -318,9 +357,37 @@ export default function App() {
               {groups.map((group, index) => (
                 <li
                   key={group.cwd}
-                  className="worktree"
+                  className={`worktree${
+                    dragging === pathKey(group.cwd) ? " dragging" : ""
+                  }${dropTarget === pathKey(group.cwd) ? " drop-target" : ""}`}
                   /* Capped so a long list does not trail on forever. */
                   style={{ "--i": Math.min(index, 5) } as CSSProperties}
+                  draggable
+                  onDragStart={(event) => {
+                    setDragging(pathKey(group.cwd));
+                    event.dataTransfer.effectAllowed = "move";
+                    // Firefox refuses to start a drag without payload.
+                    event.dataTransfer.setData("text/plain", group.cwd);
+                  }}
+                  onDragEnd={() => {
+                    setDragging(null);
+                    setDropTarget(null);
+                  }}
+                  onDragOver={(event) => {
+                    if (!dragging) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    setDropTarget(pathKey(group.cwd));
+                  }}
+                  onDragLeave={() => {
+                    setDropTarget((current) =>
+                      current === pathKey(group.cwd) ? null : current,
+                    );
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    reorder(pathKey(group.cwd));
+                  }}
                 >
                   <button
                     className={`worktree-head ${group.state}${group.quiet ? " quiet" : ""}`}
