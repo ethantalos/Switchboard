@@ -10,7 +10,7 @@
 | Styling | Plain CSS | No framework until real UI needs one |
 | Packages | npm + Cargo | Frontend and Rust dependencies |
 
-Exact versions live in `package.json` and `src-tauri/Cargo.toml`.
+Exact versions live in `package.json` and `src-rust/Cargo.toml`.
 
 ## Prerequisites
 - Node.js and npm

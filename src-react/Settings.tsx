@@ -52,7 +52,7 @@ export default function Settings() {
       <section className="group">
         <h2>Display</h2>
         <p className="copy">
-          Reported by this window. Useful when the widget looks the wrong size on
+          Reported by this window. Useful when Eve looks the wrong size on
           a monitor with different scaling.
         </p>
         <p className="metrics">

@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Switchboard",
+        "title": "Eve",
         "width": 320,
         "height": 320,
         "resizable": false,

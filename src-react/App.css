@@ -24,7 +24,8 @@
   box-shadow: 0 6px 20px rgb(0 0 0 / 45%);
   cursor: grab;
   user-select: none;
-  color: var(--brand);
+  --status: var(--brand);
+  color: var(--status);
   transition:
     width 120ms ease-out,
     height 120ms ease-out,
@@ -47,9 +48,14 @@
   height: 320px;
 }
 
-/* Status colour flows into the mark through currentColor. */
+/*
+ * Status colour reaches the mark through currentColor and the count pill
+ * through --status. The pill cannot use currentColor: it sets its own `color`
+ * for the digit, and currentColor resolves against that, so it would paint
+ * itself dark-on-dark.
+ */
 .box.needs_you {
-  color: var(--accent);
+  --status: var(--accent);
   box-shadow:
     0 6px 20px rgb(0 0 0 / 45%),
     0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
@@ -57,11 +63,11 @@
 }
 
 .box.working {
-  color: var(--warn);
+  --status: var(--warn);
 }
 
 .box.done {
-  color: var(--ok);
+  --status: var(--ok);
 }
 
 /*
@@ -87,7 +93,7 @@
   min-width: 0.9375rem;
   padding: 0 0.1875rem;
   border-radius: 999px;
-  background: currentColor;
+  background: var(--status);
   color: var(--bg);
   font-size: 0.625rem;
   font-weight: 700;
@@ -98,6 +104,44 @@
 
 .box.expanded .count {
   display: none;
+}
+
+/*
+ * The expanded list. With no rule at all it is a shrink-to-fit child of a
+ * centred `overflow: hidden` box, so a list longer than the box is clipped
+ * from the TOP - which is exactly where the needs_you rows sort. Stretch it,
+ * let it scroll, and keep the padding clear of the close and gear buttons.
+ */
+.panel {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
+  width: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1.375rem 0.625rem 1.625rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Marks a worktree whose editor Switchboard has thrown onto a monitor. */
+.parked {
+  flex: none;
+  font-size: 0.6875rem;
+  line-height: 1;
+  opacity: 0.65;
+}
+
+/* text-overflow cannot fire unless every flex ancestor may shrink. */
+.worktree,
+.worktree-head {
+  min-width: 0;
+}
+
+/* Found in ~/.claude/ide but no hook yet: present, state not known. */
+.unknown > .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--muted);
 }
 
 .close {

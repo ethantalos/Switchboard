@@ -12,9 +12,9 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     watch: {
-      // The Rust build writes into src-tauri/target while Vite is watching,
+      // The Rust build writes into src-rust/target while Vite is watching,
       // and Windows locks those files. Watching them crashes the dev server.
-      ignored: ['**/src-tauri/**'],
+      ignored: ['**/src-rust/**'],
     },
   },
 })
