@@ -16,6 +16,8 @@ type SessionState =
 type Session = {
   sessionId: string;
   cwd: string;
+  /// "claude" or "codex". Both are discovered from what they write to disk.
+  agent: string;
   state: SessionState;
   detail: string | null;
   updatedAt: number;
@@ -517,6 +519,9 @@ export default function App() {
                         }
                       >
                         <span className="dot" aria-hidden="true" />
+                        {session.agent !== "claude" && (
+                          <span className="agent">{session.agent}</span>
+                        )}
                         <span className="state">{LABEL[session.state]}</span>
                         {session.detail ? (
                           <span className="detail">{session.detail}</span>

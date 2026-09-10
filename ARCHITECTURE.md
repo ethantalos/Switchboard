@@ -96,6 +96,15 @@ files survive restarts.
    as a permanent ghost claiming to be working - found by running a real
    `claude -p` session end to end, not by reading the code.
 
+Codex is read the same way. Its rollouts live at
+`~/.codex/sessions/YYYY/MM/DD/rollout-<stamp>-<id>.jsonl` and open with a
+`session_meta` line carrying `cwd` and `session_id` - the same shape, so the
+same merge applies and no setup is needed. Windows long-path prefixes are
+stripped, or a session splits off into a worktree of its own. Claude Code
+threads that Codex has imported are recorded in its SQLite thread table
+rather than written as rollouts, so reading rollouts cannot double-count
+sessions already tracked.
+
 A session silent for 30 minutes is dimmed and left out of the badge count;
 one silent for 12 hours is dropped, since a closed window fires no
 `SessionEnd`. Paths are compared case-insensitively
@@ -324,7 +333,14 @@ sorted by urgency, so a new one still surfaces on its own.
 ## Known limitations
 - Mixed-DPI: the widget renders oversized on a monitor with different scaling.
 - Sessions are in memory only.
-- Codex sessions are not tracked; its CLI has no documented push equivalent.
+- Codex sessions are discovered but never say what they are doing. Codex
+  0.153 does have a hooks system with almost the same contract as Claude
+  Code's, but its hooks must be trusted through `/hooks` before they run and
+  the trust is keyed to a hash of the hook definition, so every Switchboard
+  update would re-arm the prompt. Until that is worth asking of someone, only
+  presence and activity are known.
+- Codex has no `Notification` event, so "blocked on you" cannot be detected
+  for it the way it can for Claude Code.
 - Editor discovery finds that a session exists, not what it is doing. State
   stays `unknown` until a hook arrives.
 - macOS is untested.

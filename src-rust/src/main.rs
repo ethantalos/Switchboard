@@ -878,6 +878,8 @@ fn recent_hooks(log: tauri::State<HookLog>) -> Vec<HookRecord> {
 pub struct Session {
     session_id: String,
     cwd: String,
+    /// Which assistant this session belongs to: "claude" or "codex".
+    agent: &'static str,
     state: &'static str,
     detail: Option<String>,
     updated_at: u64,
@@ -1063,6 +1065,7 @@ const TRANSCRIPT_HEAD_LINES: usize = 40;
 pub struct Transcript {
     session_id: String,
     cwd: String,
+    agent: &'static str,
     last_write: u64,
 }
 
@@ -1144,12 +1147,141 @@ fn scan_transcripts(
             found.push(Transcript {
                 session_id: session_id.to_string(),
                 cwd,
+                agent: "claude",
                 last_write,
             });
         }
     }
 
-    keep_current(found, now)
+    found
+}
+
+/// Sessions Codex has written, found the same way Claude Code's are.
+///
+/// Codex 0.153 does have a hooks system with almost the same contract, but
+/// its hooks must be trusted through `/hooks` before they run, and the trust
+/// is keyed to a hash of the hook definition - so every Switchboard update
+/// would re-arm the prompt. Reading what it already writes needs no setup and
+/// cannot be left half-configured.
+///
+/// Rollouts live at `~/.codex/sessions/YYYY/MM/DD/rollout-<stamp>-<id>.jsonl`
+/// and open with a `session_meta` line carrying `cwd` and `session_id`. That
+/// is the same shape as a Claude Code transcript, so the same merge applies.
+///
+/// Imported Claude Code threads are deliberately not a problem here: they are
+/// recorded in Codex's SQLite thread table, not written as rollouts, so
+/// reading rollouts cannot double-count sessions already tracked.
+fn scan_codex(
+    home: &Path,
+    now: u64,
+    cwds: &mut HashMap<std::path::PathBuf, String>,
+) -> Vec<Transcript> {
+    let root = home.join(".codex").join("sessions");
+    let mut found = Vec::new();
+
+    // sessions/<year>/<month>/<day>/rollout-*.jsonl
+    for year in read_dir_paths(&root) {
+        for month in read_dir_paths(&year) {
+            for day in read_dir_paths(&month) {
+                for path in read_dir_paths(&day) {
+                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if !stem.starts_with("rollout-") {
+                        continue;
+                    }
+
+                    let last_write = modified_ms(&path);
+                    if now.saturating_sub(last_write) > TRANSCRIPT_WINDOW_MS {
+                        continue;
+                    }
+
+                    let Some((cwd, session_id)) = codex_head(&path, cwds) else {
+                        continue;
+                    };
+                    found.push(Transcript {
+                        session_id,
+                        cwd,
+                        agent: "codex",
+                        last_write,
+                    });
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Directory entries as paths, or nothing if it cannot be read.
+fn read_dir_paths(dir: &Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default()
+}
+
+/// Last-modified time in milliseconds, or 0.
+fn modified_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The working directory and id from a rollout's `session_meta` line.
+///
+/// Cached like Claude Code's, since neither can change once written. The id
+/// falls back to the filename's trailing uuid when the payload omits it.
+fn codex_head(
+    path: &Path,
+    cwds: &mut HashMap<std::path::PathBuf, String>,
+) -> Option<(String, String)> {
+    use std::io::{BufRead, BufReader};
+
+    let id_from_name = || {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|stem| stem.rsplit('-').next())
+            .map(str::to_string)
+    };
+
+    if let Some(known) = cwds.get(path) {
+        let (cwd, id) = known.split_once('\n')?;
+        return Some((cwd.to_string(), id.to_string()));
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    for line in BufReader::new(file).lines().take(TRANSCRIPT_HEAD_LINES) {
+        let Ok(line) = line else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+            continue;
+        }
+        let payload = value.get("payload")?;
+        let cwd = payload.get("cwd").and_then(|c| c.as_str())?;
+        if cwd.is_empty() {
+            return None;
+        }
+        // Windows long-path form shows up here; normalising keeps a session
+        // from splitting off into a worktree of its own.
+        let cwd = cwd.strip_prefix(r"\?\").unwrap_or(cwd).to_string();
+        let id = payload
+            .get("session_id")
+            .or_else(|| payload.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(id_from_name)?;
+
+        cwds.insert(path.to_path_buf(), format!("{cwd}\n{id}"));
+        return Some((cwd, id));
+    }
+    None
 }
 
 /// Reduce a directory full of history to the sessions worth showing.
@@ -1161,7 +1293,7 @@ fn scan_transcripts(
 fn keep_current(found: Vec<Transcript>, now: u64) -> Vec<Transcript> {
     let mut newest: HashMap<String, u64> = HashMap::new();
     for t in &found {
-        let key = t.cwd.replace('\\', "/").to_lowercase();
+        let key = format!("{}|{}", t.agent, t.cwd.replace('\\', "/").to_lowercase());
         let slot = newest.entry(key).or_insert(0);
         *slot = (*slot).max(t.last_write);
     }
@@ -1170,7 +1302,7 @@ fn keep_current(found: Vec<Transcript>, now: u64) -> Vec<Transcript> {
         .into_iter()
         .filter(|t| {
             let active = now.saturating_sub(t.last_write) < TRANSCRIPT_ACTIVE_MS;
-            let key = t.cwd.replace('\\', "/").to_lowercase();
+            let key = format!("{}|{}", t.agent, t.cwd.replace('\\', "/").to_lowercase());
             active || newest.get(&key) == Some(&t.last_write)
         })
         .collect()
@@ -1224,6 +1356,7 @@ fn merge_transcripts(
                     Session {
                         session_id: t.session_id.clone(),
                         cwd: t.cwd.clone(),
+                        agent: t.agent,
                         // Disk says it exists and when it last moved. It
                         // cannot say what it is doing, so do not pretend.
                         state: if active { "working" } else { "unknown" },
@@ -1251,7 +1384,9 @@ fn start_transcript_watch(app: AppHandle) {
         let mut cwds: HashMap<std::path::PathBuf, String> = HashMap::new();
         loop {
             let now = now_ms();
-            let found = scan_transcripts(&home, now, &mut cwds);
+            let mut found = scan_transcripts(&home, now, &mut cwds);
+            found.extend(scan_codex(&home, now, &mut cwds));
+            let found = keep_current(found, now);
             let store = app.state::<SessionStore>();
             let mut sessions = store.0.lock().unwrap();
             let ended = app.state::<Ended>();
@@ -1330,6 +1465,9 @@ fn apply_hook(
         Session {
             session_id: session_id.to_string(),
             cwd,
+            // Only Claude Code posts hooks here today. Codex sessions are
+            // found on disk instead, and label themselves.
+            agent: "claude",
             state,
             detail: detail_for(event, &value),
             updated_at: now_ms(),
@@ -1924,6 +2062,7 @@ mod tests {
                 Session {
                     session_id: id.to_string(),
                     cwd: "C:/x".to_string(),
+                    agent: "claude",
                     state: "waiting",
                     detail: None,
                     updated_at: now - age,
@@ -2041,6 +2180,7 @@ mod tests {
         Session {
             session_id: "s".to_string(),
             cwd: "c:/Themis B".to_string(),
+            agent: "claude",
             state,
             detail: None,
             updated_at: now - age,
@@ -2057,6 +2197,7 @@ mod tests {
         let found = vec![Transcript {
             session_id: "themis-b".to_string(),
             cwd: "c:/Themis B".to_string(),
+            agent: "claude",
             last_write: now - 5_000,
         }];
 
@@ -2074,6 +2215,7 @@ mod tests {
         let found = vec![Transcript {
             session_id: "old".to_string(),
             cwd: "c:/Themis".to_string(),
+            agent: "claude",
             last_write: now - 30 * 60 * 1000,
         }];
         merge_transcripts(&mut sessions, &HashMap::new(), &found, now);
@@ -2091,6 +2233,7 @@ mod tests {
         let found = vec![Transcript {
             session_id: "s".to_string(),
             cwd: "c:/Themis B".to_string(),
+            agent: "claude",
             last_write: now - 2_000,
         }];
 
@@ -2109,6 +2252,7 @@ mod tests {
         let found = vec![Transcript {
             session_id: "s".to_string(),
             cwd: "c:/Themis B".to_string(),
+            agent: "claude",
             last_write: now - 500,
         }];
 
@@ -2124,6 +2268,7 @@ mod tests {
         let found = vec![Transcript {
             session_id: "s".to_string(),
             cwd: "c:/Themis B".to_string(),
+            agent: "claude",
             last_write: now - 3_000,
         }];
 
@@ -2139,6 +2284,7 @@ mod tests {
         let found = vec![Transcript {
             session_id: "s".to_string(),
             cwd: "c:/Themis B".to_string(),
+            agent: "claude",
             last_write: now - 1_000,
         }];
 
@@ -2174,6 +2320,7 @@ mod tests {
         let t = |id: &str, cwd: &str, age: u64| Transcript {
             session_id: id.to_string(),
             cwd: cwd.to_string(),
+            agent: "claude",
             last_write: now - age,
         };
         let found = vec![
@@ -2226,6 +2373,7 @@ mod tests {
         let found = vec![Transcript {
             session_id: "lab".to_string(),
             cwd: "c:/lab/alpha".to_string(),
+            agent: "claude",
             last_write: now - 2_000,
         }];
         assert!(!merge_transcripts(&mut sessions, &ended, &found, now));
@@ -2235,6 +2383,7 @@ mod tests {
         let other = vec![Transcript {
             session_id: "still-running".to_string(),
             cwd: "c:/lab/beta".to_string(),
+            agent: "claude",
             last_write: now - 2_000,
         }];
         assert!(merge_transcripts(&mut sessions, &ended, &other, now));
