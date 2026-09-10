@@ -504,3 +504,47 @@
   width: 0.625rem;
   opacity: 0.55;
 }
+
+/*
+ * Hold the panel open. Sits beside the close button, filled when engaged.
+ */
+.pin {
+  position: absolute;
+  top: 0.1875rem;
+  right: 1.375rem;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1;
+  padding: 0 0.1875rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.pin.on {
+  color: var(--status);
+}
+
+.pin:hover,
+.close:hover,
+.gear:hover {
+  color: var(--text);
+}
+
+/*
+ * Keyboard focus has to be visible, because arrow keys are the only way to
+ * move through the list without a mouse. Never remove the ring without
+ * replacing it.
+ */
+.worktree-head:focus-visible,
+.pin:focus-visible,
+.close:focus-visible,
+.gear:focus-visible {
+  outline: 2px solid var(--status);
+  outline-offset: 1px;
+}
+
+.surface:focus {
+  outline: none;
+}

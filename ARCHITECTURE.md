@@ -194,6 +194,7 @@ The frontend has no OS access; it calls Rust through `invoke`.
 | `list_workspaces()` | Editors with Claude Code attached, from `~/.claude/ide` |
 | `list_parked()` | Worktrees currently filling a monitor, which a click can send back |
 | `list_order()` / `set_order(order)` | The order worktrees were dragged into |
+| `is_pinned()` / `set_pinned(pinned)` | Hold the panel open regardless of the pointer |
 | `hook_endpoint()` | The URL hooks should POST to |
 | `quiet_after_ms()` | How long before a silent session is dimmed |
 | `recent_hooks()` | The last 200 hook deliveries, for diagnosing silence |
@@ -272,6 +273,18 @@ iOS and Android, which need a library rather than a `main()`. Switchboard
 targets Windows and macOS only, so the split was removed along with the
 `[lib]` target in Cargo.toml. Adding a mobile target later means putting
 both back.
+
+## Staying open
+Hover alone means the panel vanishes the moment you look away, which is wrong
+as soon as you want to read it while typing elsewhere, or drag a worktree
+without the list closing under the cursor. The pin overrides the hover watch
+outright, and takes cursor events back immediately rather than waiting for
+the next 60ms poll, so the click that pinned it does not fall through to
+whatever is behind.
+
+Arrow keys walk the worktree list and Escape releases the pin. Without that
+the widget cannot be used from the keyboard at all, since reaching it
+otherwise requires hovering a 60px target.
 
 ## Ordering
 Worktrees sort by urgency, which is right until you have a fixed mental

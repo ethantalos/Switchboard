@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
@@ -536,6 +537,35 @@ const COLLAPSED: f64 = 60.0;
 /// How often to check whether the pointer is over the widget.
 const HOVER_POLL_MS: u64 = 60;
 
+/// Held open regardless of where the pointer is.
+///
+/// Hover alone means the panel vanishes the moment you look away, which is
+/// wrong as soon as you want to read it while doing something else, or drag a
+/// worktree without the list closing under the cursor.
+#[derive(Default)]
+pub struct Pinned(AtomicBool);
+
+/// Hold the panel open, or let hover decide again.
+#[tauri::command]
+fn set_pinned(app: AppHandle, pinned: bool) -> Result<(), String> {
+    app.state::<Pinned>().0.store(pinned, Ordering::Relaxed);
+
+    // Take the cursor back immediately rather than waiting for the next poll,
+    // so the click that pinned it does not land on whatever is behind.
+    if let Some(window) = app.get_webview_window("main") {
+        if pinned {
+            let _ = window.set_ignore_cursor_events(false);
+        }
+    }
+    let _ = app.emit("pinned-changed", pinned);
+    Ok(())
+}
+
+#[tauri::command]
+fn is_pinned(state: tauri::State<Pinned>) -> bool {
+    state.0.load(Ordering::Relaxed)
+}
+
 /// Watch the pointer and flip the widget between collapsed and expanded.
 ///
 /// While collapsed the window ignores the cursor, so the transparent margin
@@ -574,8 +604,16 @@ fn start_hover_watch(app: AppHandle) {
                 (x - centre_x).abs() <= half && (y - centre_y).abs() <= half;
 
             // Grow when the pointer reaches the badge, shrink once it leaves
-            // the whole window, so the edges are not a knife edge.
-            let want = if expanded { over_window } else { over_badge };
+            // the whole window, so the edges are not a knife edge. Pinned
+            // overrides both.
+            let pinned = app.state::<Pinned>().0.load(Ordering::Relaxed);
+            let want = if pinned {
+                true
+            } else if expanded {
+                over_window
+            } else {
+                over_badge
+            };
             if want != expanded {
                 expanded = want;
                 let _ = window.set_ignore_cursor_events(!expanded);
@@ -1623,6 +1661,7 @@ fn main() {
         .manage(PlacementStore::default())
         .manage(HookLog::default())
         .manage(OrderStore::default())
+        .manage(Pinned::default())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -1655,6 +1694,8 @@ fn main() {
             hook_health,
             list_order,
             set_order,
+            set_pinned,
+            is_pinned,
             close_widget,
             connect_claude_code,
             window_metrics,

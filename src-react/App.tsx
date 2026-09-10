@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type React from "react";
 import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -235,6 +236,7 @@ export default function App() {
   const [order, setOrder] = useState<string[]>([]);
   const [dragging, setDragging] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [pinned, setPinned] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -245,6 +247,7 @@ export default function App() {
     void invoke<string[]>("list_parked").then(setParked).catch(() => {});
     void invoke<number>("quiet_after_ms").then(setQuietAfterMs).catch(() => {});
     void invoke<string[]>("list_order").then(setOrder).catch(() => {});
+    void invoke<boolean>("is_pinned").then(setPinned).catch(() => {});
 
     // Rust owns hover: the window never resizes, so it watches the pointer and
     // tells us when to grow. Nothing here changes window geometry.
@@ -263,6 +266,9 @@ export default function App() {
     const offOrder = listen<string[]>("order-changed", (event) =>
       setOrder(event.payload),
     );
+    const offPinned = listen<boolean>("pinned-changed", (event) =>
+      setPinned(event.payload),
+    );
 
     const ticker = setInterval(() => setNow(Date.now()), 10_000);
 
@@ -272,6 +278,7 @@ export default function App() {
       void offWorkspaces.then((off) => off());
       void offParked.then((off) => off());
       void offOrder.then((off) => off());
+      void offPinned.then((off) => off());
       clearInterval(ticker);
     };
   }, []);
@@ -286,6 +293,31 @@ export default function App() {
   }
 
   const groups = groupByWorktree(sessions, workspaces, now, quietAfterMs, order);
+
+  /// Arrow keys walk the worktree list, Enter opens one, Escape lets go.
+  ///
+  /// The panel is otherwise reachable only by hovering it, so without this
+  /// there is no way to use the widget from the keyboard at all.
+  function onKeys(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      void invoke("set_pinned", { pinned: false }).catch(() => {});
+      return;
+    }
+
+    const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    if (step === 0) return;
+    event.preventDefault();
+
+    const heads = [
+      ...document.querySelectorAll<HTMLButtonElement>(".worktree-head"),
+    ];
+    if (heads.length === 0) return;
+    const at = heads.indexOf(document.activeElement as HTMLButtonElement);
+    // Nothing focused yet starts at the top, which is the most urgent row.
+    const next = at === -1 ? 0 : (at + step + heads.length) % heads.length;
+    heads[next].focus();
+  }
 
   /// Move the dragged worktree in front of the one it was dropped on, and
   /// persist the whole visible order so later sessions keep the arrangement.
@@ -339,7 +371,13 @@ export default function App() {
         {count > 0 && <span className="count">{count}</span>}
       </div>
 
-      <div className="surface" aria-hidden={!expanded} data-tauri-drag-region>
+      <div
+        className="surface"
+        aria-hidden={!expanded}
+        data-tauri-drag-region
+        tabIndex={-1}
+        onKeyDown={onKeys}
+      >
         <div className="panel" data-tauri-drag-region>
           {error && (
             <p className="error" role="alert">
@@ -446,6 +484,21 @@ export default function App() {
           )}
         </div>
 
+        <button
+          className={`pin${pinned ? " on" : ""}`}
+          title={
+            pinned
+              ? "Pinned open. Click to let it collapse on hover again."
+              : "Keep open, so it does not collapse when you look away"
+          }
+          aria-pressed={pinned}
+          tabIndex={expanded ? 0 : -1}
+          onClick={() =>
+            void invoke("set_pinned", { pinned: !pinned }).catch(() => {})
+          }
+        >
+          {pinned ? "◉" : "○"}
+        </button>
         <button
           className="close"
           title="Close Eve"
