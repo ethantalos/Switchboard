@@ -77,12 +77,21 @@ when needed, and use disposable repositories for initial integration tests.
 - [ ] Test interruptions, ambiguous targets, and uncertain delivery.
 
 ## 6.5 Gaps found in daily use
-- [ ] Keyboard navigation: the widget is hover-only, so there is no way to
+- [x] Keyboard navigation: the widget is hover-only, so there is no way to
       reach a worktree without the mouse.
-- [ ] Clicking a session row does nothing. `transcript_path` is on every hook
-      payload, so opening the transcript is available.
-- [ ] `list_worktrees` is implemented and tested but nothing calls it; either
-      surface branch names per worktree or drop the command.
+- [x] Clicking a session row does nothing.
+- [ ] `list_worktrees` works against a real repository but nothing calls it;
+      either surface branch names per worktree or drop the command.
+- [ ] Ended-session tombstones live in memory, so restarting Switchboard
+      lets a finished session be rediscovered from disk once more.
+- [ ] A prompt that is machine-generated renders as raw XML in the detail
+      line. Worth detecting and summarising.
+- [ ] Codex sessions show presence and activity but never "blocked on you".
+      Its hooks would fix that, at the cost of a trust prompt on every
+      Switchboard update that edits them.
+- [ ] Codex liveness could be exact rather than inferred: a non-blocking
+      lock attempt on `~/.codex/thread-writer-locks/<id>.lock` distinguishes
+      a live session from a leaked lock.
 - [ ] Window placement is Windows-only. macOS needs an Accessibility-API
       equivalent of the Win32 move-and-maximise.
 - [ ] The transcript scan re-reads every project directory every five
