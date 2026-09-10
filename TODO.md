@@ -1,7 +1,9 @@
 # TODO
 
-Current state: repository skeleton only. Nothing runs yet.
-Next: choose the desktop stack, then launch the smallest application shell.
+Current state: Eve, the widget, works and is used daily. Claude Code sessions
+are tracked and grouped by worktree, editors are discovered, and clicking a
+worktree throws its VS Code window onto the monitor the widget is on.
+Next: Codex sessions, then durable state beyond the worktree order.
 
 Checked items mean completed work. The order below is a working plan, not a
 commitment to build every feature before using the app. Add dependencies only
@@ -14,37 +16,39 @@ when needed, and use disposable repositories for initial integration tests.
 - [x] Add Git ignores, line-ending rules, and editor defaults.
 - [x] Add TECHSTACK.md for proposed technologies and tradeoffs.
 - [x] Remove contributor/PR templates and duplicate documentation.
-- [ ] Choose an open-source license before releasing for reuse.
+- [x] Choose an open-source license before releasing for reuse.
 
 ## 1. Bootable desktop shell
-- [ ] Discuss TECHSTACK.md and select the initial stack.
-- [ ] Verify prerequisites and record toolchain versions.
-- [ ] Generate the smallest conventional application scaffold.
-- [ ] Add dependency lockfiles and actual setup, run, and build commands.
-- [ ] Configure relevant formatting, linting, type checks, and test commands.
-- [ ] Launch an empty shell on Windows.
+- [x] Discuss TECHSTACK.md and select the initial stack.
+- [x] Verify prerequisites and record toolchain versions.
+- [x] Generate the smallest conventional application scaffold.
+- [x] Add dependency lockfiles and actual setup, run, and build commands.
+- [x] Configure relevant formatting, linting, type checks, and test commands.
+- [x] Launch an empty shell on Windows.
 - [ ] Validate startup on macOS when a Mac is available.
-- [ ] Replace .gitkeep files as real files enter each folder.
+- [x] Replace .gitkeep files as real files enter each folder.
 
 ## 2. First useful workspace view
 - [ ] Register an existing local Git repository.
-- [ ] Discover its worktrees with checkout paths and branch information.
-- [ ] Show an overview and select a worktree.
-- [ ] Open the selected checkout in VS Code.
+- [x] Discover its worktrees with checkout paths and branch information.
+- [x] Show an overview and select a worktree.
+- [x] Open the selected checkout in VS Code.
 - [ ] Keep worktree environment references separate.
 - [ ] Handle invalid repositories, missing paths, detached worktrees, and paths with spaces.
-- [ ] Show launch failures clearly.
+- [x] Show launch failures clearly.
 - [ ] Validate with a disposable repository, then try the owner's daily workflow.
 
 ## 3. Agent interaction loop
 - [ ] Decide whether the first version needs existing conversations or may start new sessions.
-- [ ] Validate one supported standalone Claude Code interface.
+- [x] Validate one supported standalone Claude Code interface.
 - [ ] Validate one supported standalone Codex interface.
-- [ ] Associate each session with the correct worktree and environment.
+- [ ] Find a Codex equivalent of Claude Code's hooks, or fall back to reading
+      its session files the way Claude Code transcripts are read.
+- [x] Associate each session with the correct worktree and environment.
 - [ ] Send a specifically targeted prompt to each and identify both responses.
 - [ ] Distinguish submission, confirmed delivery, completion, failure, and unknown outcomes.
-- [ ] Show working, waiting for user, completed, disconnected, and unknown states from evidence.
-- [ ] Surface questions, blockers, and finished work in an attention feed.
+- [x] Show working, waiting for user, completed, disconnected, and unknown states from evidence.
+- [x] Surface questions, blockers, and finished work in an attention feed.
 - [ ] Validate disconnect/reconnect behavior without silently duplicating prompts.
 
 ## 4. Everyday desktop access
@@ -71,6 +75,20 @@ when needed, and use disposable repositories for initial integration tests.
 - [ ] Navigate workspaces and request session status by voice.
 - [ ] Relay a finding between sessions with traceable delivery.
 - [ ] Test interruptions, ambiguous targets, and uncertain delivery.
+
+## 6.5 Gaps found in daily use
+- [ ] Keyboard navigation: the widget is hover-only, so there is no way to
+      reach a worktree without the mouse.
+- [ ] Clicking a session row does nothing. `transcript_path` is on every hook
+      payload, so opening the transcript is available.
+- [ ] `list_worktrees` is implemented and tested but nothing calls it; either
+      surface branch names per worktree or drop the command.
+- [ ] Window placement is Windows-only. macOS needs an Accessibility-API
+      equivalent of the Win32 move-and-maximise.
+- [ ] The transcript scan re-reads every project directory every five
+      seconds. Fine at this size, wasteful later.
+- [ ] Nothing survives a restart except the worktree order, so session
+      history is lost each time.
 
 ## 7. Daily use and releases
 - [ ] Refine layout, keyboard navigation, and accessibility from real use.

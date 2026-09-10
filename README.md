@@ -45,8 +45,28 @@ is not proof of prompt delivery. Session states may be working, waiting for user
 completed, disconnected, or unknown.
 
 ## Where things stand
-A Tauri 2 desktop shell that builds and runs the default template UI. No
-Switchboard features are implemented yet, and no integrations are tested.
+Eve, the widget, works and is in daily use. It is a 320x320 always-on-top
+square that sits as a 60px badge until you hover it, then opens into the
+worktrees it knows about and the Claude Code sessions in each.
+
+Working today:
+
+- Sessions are tracked from Claude Code hooks, and discovered from session
+  transcripts on disk so ones that started before Switchboard - or survived
+  its restart - still appear.
+- Each session says what it wants: blocked on you, your turn, working, idle,
+  or quiet. The badge shows the most urgent of those and how many.
+- Editors with Claude Code attached are found by reading `~/.claude/ide`,
+  with dead locks pruned by checking the process is alive.
+- Clicking a worktree fills the monitor the widget is on with its VS Code
+  window; clicking again puts it back exactly where it was.
+- Worktrees can be dragged into a fixed order, which is saved.
+- The settings window says whether Claude Code is actually wired up, and
+  shows the raw hook traffic.
+
+Not built yet: Codex sessions, Chrome tabs, Discord, Spotify, voice, and any
+persistence beyond the worktree order. macOS is untested - the window
+placement is Windows-only.
 
 Run `npm install` once, then `npm run tauri dev`.
 Claude and Codex use identical project instructions. There is no agent-specific
