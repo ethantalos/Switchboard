@@ -274,6 +274,16 @@ targets Windows and macOS only, so the split was removed along with the
 `[lib]` target in Cargo.toml. Adding a mobile target later means putting
 both back.
 
+## Saying when it cannot see
+Unregistered hooks make every session look idle, which is indistinguishable
+from having nothing to do - the failure and the all-clear look the same. The
+panel carries a banner naming how many events are missing, and it opens the
+settings window, so the one state the widget cannot detect is at least
+announced where it is noticed.
+
+Clicking a session row opens the whole of its last message rather than the
+clipped line, which is usually enough to decide whether to go back to it.
+
 ## Staying open
 Hover alone means the panel vanishes the moment you look away, which is wrong
 as soon as you want to read it while typing elsewhere, or drag a worktree

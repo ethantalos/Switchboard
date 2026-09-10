@@ -21,6 +21,13 @@ type Session = {
   updatedAt: number;
 };
 
+/// Whether Claude Code is actually configured to report to this widget.
+type HookHealth = {
+  missing: string[];
+  misdirected: string[];
+  registered: number;
+};
+
 /// An editor with Claude Code attached, found by reading `~/.claude/ide`
 /// rather than by waiting for a hook.
 type Workspace = {
@@ -237,6 +244,9 @@ export default function App() {
   const [dragging, setDragging] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [pinned, setPinned] = useState(false);
+  const [health, setHealth] = useState<HookHealth | null>(null);
+  // Session whose full message is open. Rows are one line by default.
+  const [opened, setOpened] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -248,6 +258,7 @@ export default function App() {
     void invoke<number>("quiet_after_ms").then(setQuietAfterMs).catch(() => {});
     void invoke<string[]>("list_order").then(setOrder).catch(() => {});
     void invoke<boolean>("is_pinned").then(setPinned).catch(() => {});
+    void invoke<HookHealth>("hook_health").then(setHealth).catch(() => {});
 
     // Rust owns hover: the window never resizes, so it watches the pointer and
     // tells us when to grow. Nothing here changes window geometry.
@@ -269,6 +280,11 @@ export default function App() {
     const offPinned = listen<boolean>("pinned-changed", (event) =>
       setPinned(event.payload),
     );
+    // Reconnecting fixes hooks from the settings window, so re-check when
+    // traffic starts arriving rather than only at startup.
+    const offHooks = listen("hooks-changed", () => {
+      void invoke<HookHealth>("hook_health").then(setHealth).catch(() => {});
+    });
 
     const ticker = setInterval(() => setNow(Date.now()), 10_000);
 
@@ -279,6 +295,7 @@ export default function App() {
       void offParked.then((off) => off());
       void offOrder.then((off) => off());
       void offPinned.then((off) => off());
+      void offHooks.then((off) => off());
       clearInterval(ticker);
     };
   }, []);
@@ -385,6 +402,19 @@ export default function App() {
             </p>
           )}
 
+          {health && health.missing.length + health.misdirected.length > 0 && (
+            <button
+              className="nudge"
+              tabIndex={expanded ? 0 : -1}
+              onClick={() => void invoke("open_settings").catch(() => {})}
+              title={`Not reporting: ${[...health.missing, ...health.misdirected].join(", ")}`}
+            >
+              {health.missing.length + health.misdirected.length} hook
+              {health.missing.length + health.misdirected.length === 1 ? "" : "s"}{" "}
+              missing - sessions may look idle. Fix
+            </button>
+          )}
+
           {groups.length === 0 ? (
             <p className="empty">
               No sessions or editors found. Connect Claude Code in settings,
@@ -460,8 +490,15 @@ export default function App() {
                         key={session.sessionId}
                         className={`session ${session.state}${
                           isQuiet(session, now, quietAfterMs) ? " quiet" : ""
-                        }`}
+                        }${opened === session.sessionId ? " opened" : ""}`}
                         title={session.detail ?? undefined}
+                        onClick={() =>
+                          setOpened((current) =>
+                            current === session.sessionId
+                              ? null
+                              : session.sessionId,
+                          )
+                        }
                       >
                         <span className="dot" aria-hidden="true" />
                         <span className="state">{LABEL[session.state]}</span>

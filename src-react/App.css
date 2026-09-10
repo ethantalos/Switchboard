@@ -548,3 +548,48 @@
 .surface:focus {
   outline: none;
 }
+
+/*
+ * Hooks that are not registered make every session look idle, which is
+ * indistinguishable from having nothing to do. Say so where it is noticed,
+ * not only in a settings window nobody opens.
+ */
+.nudge {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.375rem;
+  padding: 0.3125rem 0.5rem;
+  text-align: left;
+  font: inherit;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--text);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nudge:hover {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+}
+
+/* A row is one line until you click it, then it shows the whole message. */
+.session {
+  cursor: pointer;
+}
+
+.session.opened {
+  align-items: flex-start;
+}
+
+.session.opened .detail {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  color: var(--text);
+}
+
+.session.opened .time {
+  align-self: flex-start;
+}

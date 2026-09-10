@@ -893,8 +893,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// How much of a message the widget can usefully show on one row.
-const DETAIL_CHARS: usize = 140;
+/// How much of a message is kept. The row shows one clipped line; clicking
+/// it opens the rest, so this is the length worth expanding to rather than
+/// the length that fits.
+const DETAIL_CHARS: usize = 400;
 
 /// First line, whitespace collapsed, clipped. Assistant messages are markdown
 /// paragraphs; a row has one line.
