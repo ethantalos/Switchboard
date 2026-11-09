@@ -1,0 +1,614 @@
+/*
+ * The window is a fixed 320x320 and never moves or resizes. The stage fills it
+ * and stays transparent; only .box is painted. Growing is a CSS transition, so
+ * there is no window geometry change to flicker, drift, or race.
+ */
+/*
+ * The window is a fixed 320x320 and never moves or resizes. Two surfaces sit
+ * stacked in the same grid cell - the 60px badge and the full panel - and
+ * hovering cross-fades between them. Neither ever changes its own box size,
+ * so nothing lays out mid-animation.
+ *
+ * Both stay mounted on purpose. Unmounting the panel on collapse would delete
+ * the node on the first frame of the exit, so the close could never animate.
+ *
+ * Durations and curves are Fluent 2's own tokens. Entering decelerates over
+ * 250ms, leaving accelerates over 200ms; Windows never uses the same curve or
+ * the same length in both directions.
+ */
+.stage {
+  display: grid;
+  place-items: center;
+  height: 100vh;
+  width: 100vw;
+  background: transparent;
+  --status: var(--brand);
+  color: var(--status);
+}
+
+/*
+ * Status colour reaches the mark through currentColor and the count pill
+ * through --status. The pill cannot use currentColor: it sets its own `color`
+ * for the digit, and currentColor resolves against that, so it would paint
+ * itself dark-on-dark.
+ */
+.stage.needs_you {
+  --status: var(--accent);
+}
+
+.stage.working {
+  --status: var(--warn);
+}
+
+.stage.waiting {
+  --status: var(--wait);
+}
+
+.stage.failed {
+  --status: var(--danger);
+}
+
+.badge,
+.surface {
+  grid-area: 1 / 1;
+  position: relative;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid currentColor;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 45%);
+  cursor: grab;
+  user-select: none;
+  transform-origin: center;
+  /*
+   * Rasterise once and transform the layer, instead of re-rasterising text at
+   * fractional positions every frame. Only these two elements get it; a layer
+   * per list row would be six render surfaces for a 200ms fade.
+   */
+  will-change: transform, opacity;
+  /* Colour settles at rest, so it never collides with the scale. */
+  transition:
+    color var(--duration-fast) var(--curve-easy-ease),
+    border-color var(--duration-fast) var(--curve-easy-ease);
+}
+
+.badge:active,
+.surface:active {
+  cursor: grabbing;
+}
+
+.badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 60px;
+  overflow: hidden;
+}
+
+.stage.needs_you .badge {
+  box-shadow:
+    0 6px 20px rgb(0 0 0 / 45%),
+    0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 0 18px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.surface {
+  display: flex;
+  width: 320px;
+  height: 320px;
+  overflow: hidden;
+}
+
+/*
+ * Collapsed is the panel's resting exit state, so the base rule carries the
+ * exit and the .is-expanded rule carries the entrance. That is how one
+ * element gets a different curve per direction in plain CSS.
+ */
+.surface {
+  opacity: 0;
+  transform: scale(0.9);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--duration-normal) var(--curve-accelerate),
+    transform var(--duration-normal) var(--curve-accelerate),
+    visibility 0s linear var(--duration-normal);
+}
+
+.stage.is-expanded .surface {
+  opacity: 1;
+  transform: scale(1);
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity var(--duration-gentle) var(--curve-decelerate),
+    transform var(--duration-gentle) var(--curve-decelerate),
+    visibility 0s;
+}
+
+/* The badge pushes slightly through the viewer as the panel takes over. */
+.stage.is-expanded .badge {
+  opacity: 0;
+  transform: scale(1.08);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--duration-faster) var(--curve-accelerate),
+    transform var(--duration-faster) var(--curve-accelerate),
+    visibility 0s linear var(--duration-faster);
+}
+
+/*
+ * Fixed size in both states, so the mark stays on the same screen point while
+ * the box opens out around it.
+ */
+.mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+}
+
+/* Nothing decorative may swallow the drag. */
+.mark,
+.count {
+  pointer-events: none;
+}
+
+.count {
+  position: absolute;
+  top: 0.1875rem;
+  right: 0.25rem;
+  min-width: 0.9375rem;
+  padding: 0 0.1875rem;
+  border-radius: 999px;
+  background: var(--status);
+  color: var(--bg);
+  font-size: 0.625rem;
+  font-weight: 700;
+  line-height: 0.9375rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The expanded list. With no rule at all it is a shrink-to-fit child of a
+ * centred `overflow: hidden` box, so a list longer than the box is clipped
+ * from the TOP - which is exactly where the needs_you rows sort. Stretch it,
+ * let it scroll, and keep the padding clear of the close and gear buttons.
+ */
+.panel {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
+  width: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1.375rem 0.625rem 1.625rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Marks a worktree whose editor Switchboard has thrown onto a monitor. */
+.parked {
+  flex: none;
+  font-size: 0.6875rem;
+  line-height: 1;
+  opacity: 0.65;
+}
+
+/* text-overflow cannot fire unless every flex ancestor may shrink. */
+.worktree,
+.worktree-head {
+  min-width: 0;
+}
+
+/* Found in ~/.claude/ide but no hook yet: present, state not known. */
+.unknown > .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--muted);
+}
+
+.close {
+  position: absolute;
+  top: 0.1875rem;
+  right: 0.3125rem;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.1875rem;
+  cursor: pointer;
+}
+
+.close:hover {
+  color: var(--text);
+}
+
+.close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Settings */
+
+.gear {
+  position: absolute;
+  bottom: 0.375rem;
+  left: 0.4375rem;
+  display: flex;
+  border: none;
+  background: none;
+  color: var(--muted);
+  padding: 0.1875rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.gear:hover,
+.gear.on {
+  color: var(--text);
+}
+
+/* Worktrees, each with its sessions underneath */
+
+.worktrees {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.worktree-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-align: left;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 6px;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.worktree-head:hover {
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.worktree-name {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-count {
+  margin-left: auto;
+  font-size: 0.6875rem;
+  font-family: var(--mono);
+  color: var(--muted);
+  flex: none;
+}
+
+.sessions {
+  list-style: none;
+  margin: 0;
+  /* Indent to sit under the worktree name, past its status dot. */
+  padding: 0.125rem 0 0 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.0625rem;
+}
+
+.session {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4375rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 50%;
+  flex: none;
+  background: var(--muted);
+}
+
+.worktree-head .dot {
+  width: 0.5rem;
+  height: 0.5rem;
+}
+
+.needs_you > .dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.working > .dot {
+  background: var(--warn);
+}
+
+.waiting > .dot {
+  background: var(--wait);
+}
+
+.failed > .dot {
+  background: var(--danger);
+}
+
+.session .state {
+  color: var(--text);
+  /* The label is the one thing that must never wrap onto a second line. */
+  flex: none;
+  white-space: nowrap;
+}
+
+.session.needs_you .state {
+  color: var(--accent);
+}
+
+.session.waiting .state {
+  color: var(--wait);
+}
+
+.session.failed .state {
+  color: var(--danger);
+}
+
+/*
+ * Nothing has been heard from this session in a while. Kept visible, because
+ * it may just be a window left open, but pushed into the background so it
+ * cannot be mistaken for something wanting attention.
+ */
+.quiet {
+  opacity: 0.42;
+}
+
+.quiet > .dot {
+  box-shadow: none;
+}
+
+/* Why a session wants you, straight from the Notification payload. */
+.detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.6875rem;
+  color: var(--muted);
+}
+
+.sid {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  opacity: 0.7;
+}
+
+.time {
+  margin-left: auto;
+  padding-left: 0.375rem;
+  font-size: 0.6875rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  flex: none;
+}
+
+.empty {
+  margin: 0;
+  padding: 1.25rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--muted);
+  text-align: center;
+}
+
+.error {
+  margin: 0 0 0.25rem;
+  padding: 0.375rem 0.5rem;
+  font-size: 0.6875rem;
+  font-family: var(--mono);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-radius: 6px;
+  word-break: break-word;
+}
+
+/*
+ * Content enters behind its container, not with it. Fluent staggers the
+ * container and the content by a full duration step; the rows then follow
+ * each other by a short offset. The rise is deliberately tiny - the sense of
+ * movement comes from the curve, not the distance.
+ */
+.worktree {
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity var(--duration-normal) var(--curve-decelerate),
+    transform var(--duration-normal) var(--curve-decelerate);
+}
+
+.stage.is-expanded .worktree {
+  opacity: 1;
+  transform: none;
+  /* Capped in the markup, so a long list cannot trail on forever. */
+  transition-delay: calc(var(--duration-faster) + var(--i, 0) * 30ms);
+}
+
+.empty {
+  transition: opacity var(--duration-normal) var(--curve-decelerate)
+    var(--duration-faster);
+}
+
+.stage:not(.is-expanded) .empty {
+  opacity: 0;
+}
+
+/*
+ * Reduced motion means no movement, not no feedback. Killing the transitions
+ * outright makes state changes read as glitches, so the cross-fade stays and
+ * only the travel and the stagger go.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .badge,
+  .surface,
+  .worktree {
+    transition-property: opacity;
+    transition-duration: var(--duration-faster);
+    transition-timing-function: var(--curve-easy-ease);
+    transition-delay: 0s;
+  }
+
+  .stage.is-expanded .badge,
+  .stage.is-expanded .surface,
+  .stage.is-expanded .worktree,
+  .worktree {
+    transform: none;
+  }
+}
+
+/*
+ * Drag to reorder. The row is the drag handle, so the grip is a hint rather
+ * than a target - grabbing anywhere works, which matters at this size.
+ */
+.worktree.dragging {
+  opacity: 0.3;
+}
+
+.worktree.drop-target > .worktree-head {
+  box-shadow: inset 0 2px 0 var(--status);
+}
+
+.worktree-head::before {
+  content: "⠿";
+  flex: none;
+  width: 0;
+  margin-right: -0.125rem;
+  opacity: 0;
+  color: var(--muted);
+  font-size: 0.6875rem;
+  transition: opacity var(--duration-fast) var(--curve-easy-ease);
+}
+
+.worktree-head:hover::before {
+  width: 0.625rem;
+  opacity: 0.55;
+}
+
+/*
+ * Hold the panel open. Sits beside the close button, filled when engaged.
+ */
+.pin {
+  position: absolute;
+  top: 0.1875rem;
+  right: 1.375rem;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1;
+  padding: 0 0.1875rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.pin.on {
+  color: var(--status);
+}
+
+.pin:hover,
+.close:hover,
+.gear:hover {
+  color: var(--text);
+}
+
+/*
+ * Keyboard focus has to be visible, because arrow keys are the only way to
+ * move through the list without a mouse. Never remove the ring without
+ * replacing it.
+ */
+.worktree-head:focus-visible,
+.pin:focus-visible,
+.close:focus-visible,
+.gear:focus-visible {
+  outline: 2px solid var(--status);
+  outline-offset: 1px;
+}
+
+.surface:focus {
+  outline: none;
+}
+
+/*
+ * Hooks that are not registered make every session look idle, which is
+ * indistinguishable from having nothing to do. Say so where it is noticed,
+ * not only in a settings window nobody opens.
+ */
+.nudge {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.375rem;
+  padding: 0.3125rem 0.5rem;
+  text-align: left;
+  font: inherit;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--text);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nudge:hover {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+}
+
+/* A row is one line until you click it, then it shows the whole message. */
+.session {
+  cursor: pointer;
+}
+
+.session.opened {
+  align-items: flex-start;
+}
+
+.session.opened .detail {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  color: var(--text);
+}
+
+.session.opened .time {
+  align-self: flex-start;
+}
+
+/* The listener never bound, so nothing can arrive at all. */
+.nudge.bad {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Which assistant a session belongs to, shown only when it is not Claude. */
+.agent {
+  flex: none;
+  padding: 0 0.25rem;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.5625rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
